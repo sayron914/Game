@@ -349,7 +349,8 @@ const ARCH={
  "реликвия":[{n:"медальон",f:"med"},{n:"чёрный перст",f:"finger"},
              {n:"осколок черепа",f:"skull"},{n:"истёртая книга",f:"book"}]
 };
-const PAL=["#8a8272","#a8683c","#6a8a9a","#9a6a8a","#7a9a6a","#b0a060","#8a5a5a","#6a6a9a"];
+// приглушённые металлы, кожа и сукно: яркий цвет тут читается как ошибка
+const PAL=["#8d8a7e","#7d5a3a","#5e7280","#6a5f52","#4f6a52","#a08a4e","#8a4a3c","#565a72"];
 const PREF=["","старый ","добрый ","краденый ","освящённый ","проклятый ","отцовский ","найденный "];
 
 // постройки: множители, усиливающие друг друга
@@ -588,7 +589,9 @@ class Sim{
   }
 
   log(t,tone){this.log0(t,tone||"normal");this.float=null;this.banner={t,life:4.2};}
-  fl(x,txt,col){this.floats.push({x,y:0,txt,col,life:1.1});}
+  fl(x,txt,col){
+    // без разноса по высоте несколько чисел за один тик сливаются в кашу
+    this.floats.push({x,y:-this.floats.length*9,txt,col,life:1.1});}
 
   /* --- снаряжение --- */
   equip(it){
@@ -1038,64 +1041,57 @@ class Sim{
   }
 }
 
-/* ==================== ОТРИСОВКА: ЕДИНЫЙ МИР ==================== */
+/* ==================== ОТРИСОВКА ====================
+   Всё процедурно: ни одного внешнего файла, всё считается из кода при запуске.
+   Порядок кадра:
+     небо → дальние гряды → земля → реквизит → крепость → актёры →
+     передний план → погода → свет → цветокоррекция → лента дороги.
+   Мир рисуется в мелкий буфер и растягивается без сглаживания — отсюда пиксель.
+   Текст пишется поверх в полном разрешении, иначе превращается в кашу. */
+
 const cv=document.getElementById("c"), view=cv.getContext("2d");
 const off=document.createElement("canvas"), ctx=off.getContext("2d");
-const PPS=.5, GND=200, HC=250, MMH=13;
-let PIX=2;
-function setPix(v){PIX=v;SKY=null;fit();}
-let VW=0;
-// текст рисуем поверх, в полном разрешении — иначе он превратится в кашу
+const HC=250, GND=198, MMH=13, PPS_ROAD=2.4;
+let PIX=2, PPS=PPS_ROAD, VW=0;
+
 const TXT=[];
 function txt(x,y,s,col,size,align){TXT.push({x,y,s,col,size:size||11,align:align||"center"});}
-function fit(){const r=cv.getBoundingClientRect();
-  cv.width=Math.floor(r.width);cv.height=HC;
+
+function setPix(v){PIX=v;SKY.key="";NOISE.c=null;fit();}
+function fit(){
+  const r=cv.getBoundingClientRect();
+  cv.width=Math.max(320,Math.floor(r.width||900));cv.height=HC;
   off.width=Math.ceil(cv.width/PIX);off.height=Math.ceil(HC/PIX);
   ctx.setTransform(1/PIX,0,0,1/PIX,0,0);
   ctx.imageSmoothingEnabled=false;view.imageSmoothingEnabled=false;
-  VW=cv.width/PPS;}
+  VW=cv.width/PPS;SKY.key="";VIG.c=null;}
 addEventListener("resize",fit);
 
-// разбирает и "#rrggbb", и "rgb(r,g,b)" — иначе двойное смешивание даёт NaN
+// В городе кадр должен вмещать лагерь целиком, в пути — держать масштаб.
+// Поэтому лагерь, разрастаясь, сам отодвигает камеру.
+function applyScale(sim){
+  const want=sim.mode==="town"
+    ? clamp(cv.width/Math.max(600,-keepLeft(sim)+120),.75,PPS_ROAD)
+    : PPS_ROAD;
+  if(Math.abs(want-PPS)>1e-3){PPS=want;VW=cv.width/PPS;}}
+
+/* --- цвет --- */
 function parseCol(c){
   if(typeof c!=="string")return [0,0,0];
   if(c[0]==="#")return [1,3,5].map(i=>parseInt(c.substr(i,2),16));
   const m=c.match(/-?\d+/g);
   return m&&m.length>=3?[+m[0],+m[1],+m[2]]:[0,0,0];}
-function lerpHex(a,b,t){
-  const pa=parseCol(a),pb=parseCol(b);
-  return "rgb("+pa.map((v,i)=>Math.round(v+(pb[i]-v)*t)).join(",")+")";}
-
-/* --- палитра и дизеринг --- */
-const BAYER=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
 function mix(a,b,t){const p=parseCol(a),q=parseCol(b);
   return "rgb("+p.map((v,i)=>Math.round(v+(q[i]-v)*t)).join(",")+")";}
-function shade(c,t){return t<0?mix(c,"#06070b",-t):mix(c,"#f2ead6",t);}
+const lerpHex=mix;
+function shade(c,t){return t<0?mix(c,"#06070b",-t):mix(c,"#f4ecd8",t);}
+function rgba(c,a){const p=parseCol(c);return `rgba(${p[0]},${p[1]},${p[2]},${a})`;}
 
-// небо дизерингом: полосы + шахматный переход, как в настоящем пиксель-арте
-let SKY=null;
-function drawSky(pal,W,H){
-  if(!SKY||SKY.width!==W||SKY.height!==H)SKY=ctx.createImageData(W,H);
-  const d=SKY.data,a=parseCol(pal.skyTop),b=parseCol(pal.skyBot);
-  for(let y=0;y<H;y++){
-    const t=y/(H-1);
-    for(let x=0;x<W;x++){
-      const th=BAYER[(y&3)*4+(x&3)]/16;
-      const q=Math.round(clamp(t+(th-.5)*.22,0,1)*5)/5;
-      const i=(y*W+x)*4;
-      d[i]=a[0]+(b[0]-a[0])*q;d[i+1]=a[1]+(b[1]-a[1])*q;d[i+2]=a[2]+(b[2]-a[2])*q;d[i+3]=255;}}
-  ctx.putImageData(SKY,0,0);}
+const BAYER=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
+const bay=(x,y)=>BAYER[((y&3)<<2)+(x&3)]/16;
 
-// спрайт из прямоугольников с обводкой — силуэт читается на любом фоне
-function sprite(parts,ox,oy,ol){
-  if(ol){ctx.fillStyle=ol;
-    for(const p of parts)ctx.fillRect(ox+p[0]-1,oy+p[1]-1,p[2]+2,p[3]+2);}
-  for(const p of parts){ctx.fillStyle=p[4];ctx.fillRect(ox+p[0],oy+p[1],p[2],p[3]);}}
-function shadow(x,gy,w){ctx.fillStyle="rgba(6,7,11,.32)";ctx.fillRect(x-w/2,gy-1,w,2);}
-
-
-// палитра двора крепости
-const KEEPPAL={skyTop:"#33404f",skyBot:"#7d8a7a",far:"#3d4a38",mid:"#243020",
+/* --- палитры мира --- */
+const KEEPPAL={skyTop:"#2d3a4a",skyBot:"#7b8a76",far:"#3a4736",mid:"#26301f",
   gnd:"#33381f",grass:"#4d5a2c",acc:"#c8b98a",prop:"none",part:"dust",
   ta:1.5,tf:200,dens:.25,name:"Крепость",clut:"none"};
 
@@ -1106,8 +1102,6 @@ function bioPal(d){const i=bIdx(d),c=BIOMES[i],n=BIOMES[i+1];
   for(const k of ["skyTop","skyBot","far","mid","gnd","grass","acc"])o[k]=lerpHex(c[k],n[k],t);
   for(const k of ["ta","tf","dens"])o[k]=c[k]+(n[k]-c[k])*t;
   return o;}
-
-// единая палитра мира: двор слева плавно переходит в первый биом
 function visPal(x){
   if(x<=0)return KEEPPAL;
   if(x>=300)return bioPal(x);
@@ -1120,45 +1114,628 @@ function visPal(x){
 function terr(wx){
   if(wx<=-20)return GND;
   const b=visPal(wx);
-  return GND-(Math.sin(wx/b.tf)*b.ta+Math.sin(wx/(b.tf*.37)+1.7)*b.ta*.45);}
+  // три масштаба: холмы, складки, мелкая рябь. Без крупного горизонт — прямая.
+  const a=Math.min(b.ta,8);
+  const y=GND-(Math.sin(wx/360+.4)*(a*1.5+7)
+             +Math.sin(wx/b.tf)*a+Math.sin(wx/(b.tf*.37)+1.7)*a*.45
+             +Math.sin(wx/(b.tf*.13)+.6)*a*.18);
+  return clamp(y,GND-44,GND+14);}
 
-function prop(kind,x,g,seed,pal){
-  const h=22+hash(seed*3)*38,w=5+hash(seed*7)*6;
-  const dark=shade(pal.mid,-.35), lit=shade(pal.mid,.16);
+/* --- свет: собирается за кадр, накладывается разом --- */
+const LIGHTS=[];
+function light(x,y,r,col,a){if(a>.01)LIGHTS.push({x,y,r,col,a});}
+const GLOW={};
+function glowSprite(col){
+  if(GLOW[col])return GLOW[col];
+  const s=64,c=document.createElement("canvas");c.width=c.height=s;
+  const g=c.getContext("2d");
+  const gr=g.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2);
+  gr.addColorStop(0,rgba(col,.95));gr.addColorStop(.45,rgba(col,.32));
+  gr.addColorStop(1,rgba(col,0));
+  g.fillStyle=gr;g.fillRect(0,0,s,s);
+  GLOW[col]=c;return c;}
+function drawLights(dark){
+  if(!LIGHTS.length)return;
+  ctx.save();ctx.globalCompositeOperation="lighter";
+  for(const L of LIGHTS){
+    const a=L.a*(.35+dark*.75);
+    if(a<=.01)continue;
+    ctx.globalAlpha=Math.min(1,a);
+    const s=glowSprite(L.col);
+    ctx.drawImage(s,L.x-L.r,L.y-L.r,L.r*2,L.r*2);}
+  ctx.restore();ctx.globalAlpha=1;}
+
+/* --- небо: рампа с дизерингом, светило, облака, звёзды --- */
+const SKY={buf:null,key:"",w:0,h:0};
+function drawSky(pal,tod,weather,W,H){
+  const key=`${pal.skyTop}|${pal.skyBot}|${Math.round(tod*120)}|${weather}|${W}x${H}`;
+  if(SKY.key!==key||!SKY.buf||SKY.w!==W||SKY.h!==H){
+    SKY.buf=ctx.createImageData(W,H);SKY.w=W;SKY.h=H;SKY.key=key;
+    const raw=clamp(.5+.5*Math.sin((tod-.25)*Math.PI*2),0,1);
+    const l=Math.pow(raw,.7);
+    const warm=Math.max(0,1-Math.abs(raw-.5)*4);
+    // три опорных цвета вместо двух — так небо перестаёт быть плоской заливкой
+    let top=mix("#080a14",pal.skyTop,l);
+    let mid=mix("#0e1220",mix(pal.skyTop,pal.skyBot,.55),l);
+    let hor=mix("#171d2c",pal.skyBot,l);
+    top=mix(top,"#7d3a1e",warm*.30);
+    mid=mix(mid,"#c26a2c",warm*.42);
+    hor=mix(hor,"#f0b060",warm*.50);
+    if(weather==="rain"){top=mix(top,"#2a2f38",.45);mid=mix(mid,"#333944",.45);hor=mix(hor,"#3d434e",.4);}
+    if(weather==="fog"){top=mix(top,"#4a5058",.35);mid=mix(mid,"#5a6068",.4);hor=mix(hor,"#6d7278",.45);}
+    const a=parseCol(top),b=parseCol(mid),c=parseCol(hor),d=SKY.buf.data;
+    for(let y=0;y<H;y++){
+      const t=y/(H-1);
+      // два отрезка рампы: верх→середина→горизонт
+      const seg=t<.55?[a,b,t/.55]:[b,c,(t-.55)/.45];
+      for(let x=0;x<W;x++){
+        const q=clamp(seg[2]+(bay(x,y)-.5)*.17,0,1);
+        const st=Math.round(q*6)/6;                    // ступени, как в пиксель-арте
+        const i=(y*W+x)*4;
+        d[i]  =seg[0][0]+(seg[1][0]-seg[0][0])*st;
+        d[i+1]=seg[0][1]+(seg[1][1]-seg[0][1])*st;
+        d[i+2]=seg[0][2]+(seg[1][2]-seg[0][2])*st;
+        d[i+3]=255;}}}
+  ctx.putImageData(SKY.buf,0,0);}
+
+function drawLuminary(sim,tod,W){
+  const raw=.5+.5*Math.sin((tod-.25)*Math.PI*2);
+  const arc=(tod-.25)*Math.PI*2;
+  const sunUp=raw>.06;
+  const x=W*(.5+Math.cos(arc+Math.PI)*.42);
+  const y=MMH+18+(1-clamp(raw,0,1))*(GND-MMH-60);
+  if(sunUp){
+    const warm=Math.max(0,1-Math.abs(raw-.5)*4);
+    const col=mix("#ffe6a8","#ff8c3c",warm);
+    light(x,y,44,col,.30+warm*.35);
+    ctx.fillStyle=col;
+    ctx.beginPath();ctx.arc(x,y,7,0,7);ctx.fill();
+    ctx.fillStyle=rgba(col,.30);
+    ctx.beginPath();ctx.arc(x,y,12,0,7);ctx.fill();}
+  else{
+    const mx=W*(.5+Math.cos(arc)*.42);
+    const my=MMH+22+clamp(raw,0,1)*(GND-MMH-70);
+    light(mx,my,34,"#b8c8ff",.22);
+    ctx.fillStyle="#d6ddf0";
+    ctx.beginPath();ctx.arc(mx,my,6,0,7);ctx.fill();
+    ctx.fillStyle="#aab4cc";                              // кратеры, чтобы луна не была кружком
+    ctx.fillRect(mx-2,my-2,2,2);ctx.fillRect(mx+1,my+1,2,2);ctx.fillRect(mx-3,my+2,1,1);}}
+
+function drawStars(camX,dark,t,W){
+  if(dark<.12)return;
+  for(let i=0;i<64;i++){
+    const sx=(hash(i*3.1)*W*1.4-camX*.04)%(W*1.4);
+    if(sx<0||sx>W)continue;
+    const sy=MMH+3+hash(i*7.7)*(GND-MMH-70);
+    const tw=.55+.45*Math.sin(t*(1.2+hash(i*2.3)*2.4)+i);
+    ctx.fillStyle=rgba(hash(i*5.1)>.85?"#ffd9a0":"#dfe6ff",dark*tw*.85);
+    ctx.fillRect(sx,sy,1,1);}}
+
+// облака: три слоя разной скорости, дизеринг по краю
+function drawClouds(camX,pal,tod,weather,t,W){
+  const raw=clamp(.5+.5*Math.sin((tod-.25)*Math.PI*2),0,1);
+  const warm=Math.max(0,1-Math.abs(raw-.5)*4);
+  const dens=weather==="rain"?1.5:weather==="fog"?.7:1;
+  for(let L=0;L<3;L++){
+    const par=[.05,.10,.17][L], sc=[1,.72,.5][L], yb=MMH+8+L*26;
+    const base=mix(mix("#1a2030",pal.skyBot,raw*.85),"#f0a060",warm*.45);
+    const col=shade(base,[.22,.10,-.05][L]);
+    const dark=shade(base,[-.10,-.20,-.30][L]);
+    const span=260;
+    const s0=Math.floor((camX*par-t*[3,2,1.2][L])/span)-1;
+    for(let i=s0;i<s0+Math.ceil(W/span)+3;i++){
+      if(hash(i*4.7+L*19.3)>.42*dens)continue;
+      const wx=i*span+hash(i*2.9+L)*span*.7;
+      const x=Math.round(wx-camX*par+t*[3,2,1.2][L]);
+      if(x<-90||x>W+90)continue;
+      const y=yb+hash(i*8.1+L*3)*14;
+      const w=(38+hash(i*6.3+L)*52)*sc, h=(6+hash(i*9.1+L)*6)*sc;
+      ctx.globalAlpha=[.5,.62,.75][L];
+      // тело облака — стопка полос, края рвём дизерингом
+      for(let r=0;r<4;r++){
+        const rw=w*[.55,.85,1,.7][r], rx=x-rw/2+ (hash(i*3.3+r)-.5)*w*.12;
+        ctx.fillStyle=r<2?col:dark;
+        ctx.fillRect(Math.round(rx),Math.round(y+r*h*.55),Math.round(rw),Math.ceil(h*.6));}
+      ctx.globalAlpha=1;}}}
+
+/* --- дальние гряды --- */
+function ridgeY(wx,seed,amp,base,pal){
+  return base-(Math.sin(wx/210+seed)*amp
+              +Math.sin(wx/83+seed*2.3)*amp*.42
+              +Math.sin(wx/37+seed*5.1)*amp*.16);}
+function drawRidges(camX,pal,horizonCol,W){
+  const LAY=[{par:.10,amp:26,base:GND-26,fog:.62,seed:1.7},
+             {par:.20,amp:20,base:GND-12,fog:.42,seed:4.2},
+             {par:.34,amp:14,base:GND-3, fog:.24,seed:8.9}];
+  for(const L of LAY){
+    const col=mix(pal.far,horizonCol,L.fog);
+    const lit=mix(shade(pal.far,.18),horizonCol,L.fog*.9);
+    ctx.fillStyle=col;ctx.beginPath();ctx.moveTo(0,GND+6);
+    const step=5;
+    for(let x=0;x<=W;x+=step){
+      const wx=camX*L.par+x/PPS;
+      ctx.lineTo(x,ridgeY(wx,L.seed,L.amp,L.base,pal));}
+    ctx.lineTo(W,GND+6);ctx.closePath();ctx.fill();
+    // подсветка гребня — без неё слои сливаются в одно пятно, но сплошная
+    // линия читается как проволока, поэтому рвём её по склону
+    ctx.fillStyle=lit;
+    for(let x=0;x<=W;x+=step){
+      const wx=camX*L.par+x/PPS;
+      const y0=ridgeY(wx,L.seed,L.amp,L.base,pal);
+      if(ridgeY(wx+step/PPS,L.seed,L.amp,L.base,pal)<y0)continue;  // только освещённый склон
+      ctx.fillRect(x,y0,step,1);}}}
+
+/* --- земля --- */
+function drawGround(sim,camX,pal0,t,W){
+  // земля всегда темнее неба на фиксированную ступень — это и держит глубину
+  const pal={...pal0,gnd:shade(pal0.gnd,-.34),grass:shade(pal0.grass,-.22)};
+  // тело земли
+  ctx.fillStyle=pal.gnd;ctx.beginPath();ctx.moveTo(0,HC+4);
+  for(let x=0;x<=W;x+=3)ctx.lineTo(x,terr(camX+x/PPS));
+  ctx.lineTo(W,HC+4);ctx.closePath();ctx.fill();
+  // дёрн идёт по рельефу
+  ctx.fillStyle=shade(pal.gnd,-.20);
+  for(let x=0;x<=W;x+=3){
+    const gy=terr(camX+x/PPS);
+    ctx.fillRect(x,gy+5,3,3);}
+  // порода лежит своей волной и рвётся, иначе выходит топографическая карта
+  ctx.fillStyle=shade(pal.gnd,-.40);
+  for(let x=0;x<=W;x+=3){
+    const wx=camX+x/PPS;
+    const ry=GND+13+Math.sin(wx/47)*4+Math.sin(wx/13+2)*1.6;
+    ctx.fillRect(x,ry,3,HC-ry);}
+  ctx.fillStyle=shade(pal.gnd,-.50);
+  for(let x=0;x<=W;x+=3){
+    const wx=camX+x/PPS;
+    const ry=GND+27+Math.sin(wx/61+1)*5+Math.sin(wx/17)*2;
+    ctx.fillRect(x,ry,3,HC-ry);}
+  // корни и камни в срезе почвы, иначе низ кадра — мёртвая заливка
+  const RS=17,r0=Math.floor(camX/RS)-1;
+  for(let i=r0;i<r0+Math.ceil(VW/RS)+3;i++){
+    const wx=i*RS,sx=(wx-camX)*PPS;
+    if(sx<-20||sx>W+20)continue;
+    const h2=hash(i*3.7);
+    if(h2>.55){                                   // корень уходит вниз от дёрна
+      ctx.fillStyle=shade(pal.gnd,-.58);
+      const gy=terr(wx),dep=6+h2*14;
+      for(let j=0;j<dep;j+=2)
+        ctx.fillRect(sx+Math.sin(j*.5+i)*2,gy+6+j,2,2);}
+    if(hash(i*8.9)>.6){                           // камень
+      ctx.fillStyle=shade(pal.gnd,-.28);
+      const w2=3+hash(i*2.2)*5;
+      ctx.fillRect(sx,GND+18+hash(i*5.5)*24,w2,3);
+      ctx.fillStyle=shade(pal.gnd,-.12);
+      ctx.fillRect(sx,GND+18+hash(i*5.5)*24,w2*.5,1);}}
+  // кромка: светлая полоса поверх, тёмная под ней
+  const edge=shade(pal.gnd,.30), sub=shade(pal.gnd,-.42);
+  for(let x=0;x<=W;x+=2){
+    const gy=terr(camX+x/PPS);
+    ctx.fillStyle=edge;ctx.fillRect(x,gy-1,2,2);
+    ctx.fillStyle=sub;ctx.fillRect(x,gy+2,2,2);}
+  // колея по центру дороги
+  ctx.fillStyle=rgba(shade(pal.gnd,-.30),.55);
+  for(let x=0;x<=W;x+=4){
+    const wx=camX+x/PPS,gy=terr(wx);
+    if(hash(Math.floor(wx/7))>.35)ctx.fillRect(x,gy+4,4,1);}
+  // трава и камни
+  const GS=7,g0=Math.floor(camX/GS)-2;
+  for(let i=g0;i<g0+Math.ceil(VW/GS)+4;i++){
+    const wx=i*GS+hash(i*5.3)*GS*.7,sx=(wx-camX)*PPS;
+    if(sx<-14||sx>W+14)continue;
+    const bs=visPal(wx),gy=terr(wx),h=hash(i*11.9);
+    if(h<clamp(bs.dens*.42,0,.8)){
+      const hh=2+hash(i*13.1)*6, sw=Math.sin(t*1.6+i)*.9;
+      ctx.fillStyle=shade(bs.grass,-.2);ctx.fillRect(sx,gy-hh,1,hh);
+      ctx.fillStyle=bs.grass;ctx.fillRect(sx+sw,gy-hh-1,1,2);}
+    else if(h>.93){
+      ctx.fillStyle=shade(bs.mid,-.1);ctx.fillRect(sx,gy-2,3,2);
+      ctx.fillStyle=shade(bs.mid,.2);ctx.fillRect(sx,gy-3,2,1);}}
+  // лужи в дождь — отражают небо, самый дешёвый способ показать мокрое
+  if(sim.weather==="rain"){
+    const PS=23,p0=Math.floor(camX/PS)-1;
+    for(let i=p0;i<p0+Math.ceil(VW/PS)+3;i++){
+      if(hash(i*17.3)<.55)continue;
+      const wx=i*PS,sx=(wx-camX)*PPS,gy=terr(wx);
+      if(sx<-30||sx>W+30)continue;
+      const w=8+hash(i*4.1)*16;
+      ctx.fillStyle=rgba(mix(pal.skyBot,"#0b0e16",.35),.55);
+      ctx.fillRect(sx,gy+1,w,2);
+      ctx.fillStyle=rgba(pal.skyBot,.30);ctx.fillRect(sx+2,gy+1,w-4,1);}}}
+
+/* --- реквизит --- */
+function prop(kind,x,g,seed,pal,depth){
+  let h=20+hash(seed*3)*40,w=5+hash(seed*7)*7;
+  const dark=shade(pal.mid,-.38), lit=shade(pal.mid,.18);
   if(kind==="rock"){
+    ctx.fillStyle=dark;
+    ctx.beginPath();ctx.moveTo(x-w,g);ctx.lineTo(x-w*.55,g-h*.62);
+    ctx.lineTo(x+w*.2,g-h);ctx.lineTo(x+w,g-h*.42);ctx.lineTo(x+w*1.2,g);ctx.closePath();ctx.fill();
     ctx.fillStyle=pal.mid;
-    ctx.beginPath();ctx.moveTo(x-w,g);ctx.lineTo(x-w*.5,g-h*.6);
-    ctx.lineTo(x+w*.2,g-h);ctx.lineTo(x+w,g-h*.4);ctx.lineTo(x+w*1.2,g);ctx.closePath();ctx.fill();
-    ctx.fillStyle=lit;ctx.fillRect(x-w*.4,g-h*.62,3,h*.3);
-    ctx.fillStyle=dark;ctx.fillRect(x+w*.55,g-h*.35,3,h*.35);}
+    ctx.beginPath();ctx.moveTo(x-w*.6,g);ctx.lineTo(x-w*.25,g-h*.55);
+    ctx.lineTo(x+w*.2,g-h*.92);ctx.lineTo(x+w*.5,g-h*.3);ctx.closePath();ctx.fill();
+    ctx.fillStyle=lit;ctx.fillRect(x-w*.3,g-h*.62,2,h*.34);}
   else if(kind==="tree"){
-    ctx.fillStyle=dark;ctx.fillRect(x-1,g-h,w*.6+2,h);
-    ctx.fillStyle=pal.mid;ctx.fillRect(x,g-h,w*.6,h);
-    for(let b=0;b<5;b++){const y=g-h+5+b*(h/6),sp=9+hash(seed+b)*14;
-      ctx.fillStyle=b%2?pal.mid:dark;ctx.fillRect(x-sp*.5,y,sp,2);}
-    ctx.fillStyle=pal.grass;
-    for(let b=0;b<3;b++)ctx.fillRect(x-5+hash(seed*b+1)*10,g-h+8+b*8,2,5);}
+    // ствол сужается кверху и клонится; ветки идут вверх, а не в стороны —
+    // иначе силуэт читается как кактус
+    const lean=(hash(seed*1.7)-.5)*9, bw=w*.55+2;
+    h*=1.75;                                     // стволы были приземистыми
+    const wood=mix(pal.mid,"#4a3526",.45), woodD=shade(wood,-.42);
+    const N=12;
+    for(let pass=0;pass<2;pass++){
+      ctx.fillStyle=pass?wood:woodD;
+      for(let s2=0;s2<N;s2++){
+        const f=s2/N, yy=g-h*f, xx=x+lean*f*f;
+        const tw=bw*(1-f*.80)+1;
+        ctx.fillRect(xx-tw/2-(pass?0:1),yy-h/N,tw+(pass?0:2),h/N+1);}}
+    ctx.fillStyle=shade(wood,.22);              // блик по освещённой стороне ствола
+    for(let s2=0;s2<N;s2++){
+      const f=s2/N, yy=g-h*f, xx=x+lean*f*f;
+      ctx.fillRect(xx-(bw*(1-f*.80)+1)/2,yy-h/N,1,h/N+1);}
+    // ветки: длинные, вверх и в сторону, с раздвоением на конце
+    for(let b=0;b<4;b++){
+      const f=.42+b*.15, yy=g-h*f, xx=x+lean*f*f;
+      const dir=hash(seed*3.3+b)>.5?1:-1, len=(9+hash(seed+b)*16)*(1-f*.3);
+      ctx.fillStyle=woodD;
+      for(let j=0;j<7;j++)
+        ctx.fillRect(xx+dir*j*len/7,yy-j*len/5.5,2,2);
+      const ex=xx+dir*len, ey=yy-len/.79;
+      ctx.fillRect(ex,ey,2,2);ctx.fillRect(ex+dir*2,ey-3,2,2);ctx.fillRect(ex-dir*2,ey-2,2,2);}
+    ctx.fillStyle=woodD;                        // корни
+    ctx.fillRect(x-bw*1.4,g-2,bw*.8,2);ctx.fillRect(x+bw*.6,g-2,bw*.8,2);
+    // крона клочьями: живого леса тут нет, поэтому редкие тёмные лохмотья
+    for(let b=0;b<5;b++){
+      const cx2=x+lean+(hash(seed*7.1+b)-.5)*17, cy=g-h*(.82+hash(seed*2.7+b)*.2);
+      ctx.fillStyle=b%2?shade(pal.grass,-.42):shade(pal.grass,-.22);
+      ctx.fillRect(cx2-4,cy,9,3);ctx.fillRect(cx2-2,cy-3,5,3);}}
   else if(kind==="cross"){
     const a=hash(seed*11)*.5-.25;
     ctx.save();ctx.translate(x,g);ctx.rotate(a);
     ctx.fillStyle=dark;ctx.fillRect(-2.5,-h*.6-1,5,h*.6+1);ctx.fillRect(-8,-h*.5-1,17,5);
     ctx.fillStyle=pal.mid;ctx.fillRect(-1.5,-h*.6,3,h*.6);ctx.fillRect(-7,-h*.5,15,3);
+    ctx.fillStyle=lit;ctx.fillRect(-1.5,-h*.6,1,h*.6);
     ctx.restore();}
   else if(kind==="crystal"){
+    w*=1.9;h*=.8;                                 // были похожи на перья
     ctx.fillStyle=dark;
     ctx.beginPath();ctx.moveTo(x,g);ctx.lineTo(x-w*.8,g-h*.4);
     ctx.lineTo(x,g-h);ctx.lineTo(x+w*.8,g-h*.5);ctx.closePath();ctx.fill();
-    ctx.fillStyle=mix(pal.mid,pal.acc,.35);
+    ctx.beginPath();ctx.moveTo(x+w*.5,g);ctx.lineTo(x+w*.3,g-h*.35);
+    ctx.lineTo(x+w*1.1,g-h*.55);ctx.lineTo(x+w*1.3,g);ctx.closePath();ctx.fill();
+    ctx.fillStyle=mix(pal.mid,pal.acc,.4);
     ctx.beginPath();ctx.moveTo(x,g-2);ctx.lineTo(x-w*.4,g-h*.4);
     ctx.lineTo(x,g-h*.92);ctx.closePath();ctx.fill();
-    ctx.fillStyle=pal.acc;ctx.globalAlpha=.5;ctx.fillRect(x-1,g-h*.85,2,h*.4);ctx.globalAlpha=1;}
+    ctx.fillStyle=pal.acc;ctx.globalAlpha=.6;ctx.fillRect(x-1,g-h*.85,2,h*.4);ctx.globalAlpha=1;
+    if(depth>0)light(x,g-h*.6,15,pal.acc,.22);}
   else if(kind==="stump"){
-    ctx.fillStyle=dark;ctx.fillRect(x-1,g-h*.5-1,w+2,h*.5+1);
-    ctx.fillStyle=pal.mid;ctx.fillRect(x,g-h*.5,w,h*.5);
-    ctx.fillStyle=shade(pal.mid,.2);ctx.fillRect(x-2,g-h*.55,w+4,3);
-    ctx.fillStyle=dark;
-    for(let b=0;b<2;b++)ctx.fillRect(x+w*.3,g-h*.5-5-b*5,6+hash(seed+b)*7,2);}}
+    // обгорелый ствол: рваный скол сверху, расширение у земли
+    const sh=h*(.35+hash(seed*5.9)*.5), sw2=w*1.1+2;
+    ctx.fillStyle=dark;ctx.fillRect(x-sw2/2-1,g-sh-1,sw2+2,sh+1);
+    ctx.fillStyle=pal.mid;ctx.fillRect(x-sw2/2,g-sh,sw2,sh);
+    ctx.fillStyle=shade(pal.mid,.18);ctx.fillRect(x-sw2/2,g-sh,1.5,sh);
+    ctx.fillStyle=dark;                                   // скол
+    for(let j=0;j<4;j++)
+      ctx.fillRect(x-sw2/2+j*sw2/4,g-sh-hash(seed*11+j)*5,sw2/4,4);
+    ctx.fillStyle=dark;                                   // корни
+    ctx.fillRect(x-sw2*.85,g-2,sw2*.45,2);ctx.fillRect(x+sw2*.4,g-2,sw2*.45,2);
+    if(hash(seed*23)>.55){                                // тлеющие угли внутри
+      ctx.fillStyle="#c9541e";ctx.fillRect(x-1,g-sh+1,3,2);
+      if(depth>0)light(x,g-sh+2,13,"#e0662a",.34);}}}
 
+function drawProps(camX,pal,W,t){
+  const SL=26;
+  for(const L of [0,1,2]){
+    const par=[.52,.72,1][L], sc=[.62,.82,1][L];
+    const fog=[.42,.22,0][L];
+    const s0=Math.floor((camX*par)/SL)-2;
+    for(let i=s0;i<s0+Math.ceil(VW/(SL*par))+4;i++){
+      const wx=i*SL+hash(i*2.1+L*7.7)*SL*.8;
+      if(wx<40)continue;
+      const sx=(wx-camX*par)*PPS;
+      if(sx<-90||sx>W+90)continue;
+      const bp=visPal(wx);
+      if(bp.prop==="none")continue;
+      if(hash(i*7.3+L*31.7)>clamp(.10+bp.dens*.16,0,.55))continue;
+      const pp={...bp,mid:shade(bp.mid,-.22)};
+      if(fog>0){pp.mid=mix(pp.mid,pal.skyBot,fog);pp.grass=mix(bp.grass,pal.skyBot,fog*.8);
+                pp.acc=mix(bp.acc,pal.skyBot,fog*.6);}
+      ctx.save();ctx.translate(Math.round(sx),Math.round(terr(wx)+L*2));ctx.scale(sc,sc);
+      prop(bp.prop,0,0,i*3+L*11,pp,L);ctx.restore();}}}
+
+// передний план: тёмные силуэты у самого зрителя. Дешёвая, но сильная глубина.
+// передний план: почти чёрные силуэты у самого зрителя. Дают глубину даром —
+// детали тут рисовать незачем, важен только силуэт на фоне неба.
+function drawForeground(camX,pal,t,W){
+  const par=1.55;
+  const near=shade(pal.gnd,-.70), near2=shade(pal.gnd,-.55);
+  // трава растёт пучками. Ровный шаг читался как колючая проволока.
+  const CL=130, c0=Math.floor((camX*par)/CL)-2;
+  for(let i=c0;i<c0+Math.ceil(VW/(CL*par))+4;i++){
+    if(hash(i*13.7)>.42)continue;
+    const cw=i*CL+hash(i*3.9)*CL*.8;
+    const csx=Math.round((cw-camX*par)*PPS);
+    if(csx<-60||csx>W+60)continue;
+    const n=5+Math.floor(hash(i*6.1)*6);
+    for(let b=0;b<n;b++){
+      const off2=(b-n/2)*(2+hash(i*2.7+b)*3);
+      const sx=Math.round(csx+off2);
+      const hh=(46+hash(i*5.1+b*1.7)*58)*(1-Math.abs(b-n/2)/n*.42);
+      const bend=Math.sin(t*.9+i+b)*3.4+off2*.10;
+      ctx.fillStyle=b%2?near:near2;
+      for(let j=0;j<hh;j+=2){
+        const f=j/hh, tw=f>.72?2:3;               // травинка сужается кверху
+        ctx.fillRect(sx+bend*f*f,HC-j-2,tw,3);}}}
+  // сук из-за кадра — только там, где есть деревья, и не чаще одного на экран
+  if(pal.prop!=="tree")return;
+  const BL=340, b0=Math.floor((camX*par)/BL)-1;
+  for(let i=b0;i<b0+Math.ceil(VW/(BL*par))+2;i++){
+    if(hash(i*23.1)>.5)continue;
+    const wx=i*BL+hash(i*7.7)*BL;
+    const sx=Math.round((wx-camX*par)*PPS);
+    if(sx<-340||sx>W+340)continue;
+    const dir=hash(i*3.1)>.5?1:-1, len=120+hash(i*9.3)*140;
+    ctx.fillStyle=near;
+    let nextTwig=18+hash(i*4.4)*26;
+    for(let j=0;j<len;j+=2){
+      const f=j/len, yy=MMH+1+Math.pow(f,2.1)*26;
+      ctx.fillRect(sx+dir*j,yy,3,9-f*7);          // сук толстый у края кадра
+      if(j>nextTwig){
+        nextTwig=j+16+hash(i*4.4+j)*34;
+        const tl=6+hash(i*2.3+j)*20, tw2=(hash(i*5.5+j)-.5)*.5;
+        for(let k=0;k<tl;k+=2)
+          ctx.fillRect(sx+dir*j+k*tw2,yy+9-f*7+k,2,2);}}}}
+
+/* --- частицы: погода и воздух биома --- */
+const PART=[];
+function tickParts(sim,camX,dt,pal,W){
+  const want=sim.weather==="rain"?110:sim.weather==="fog"?0:
+    ({dust:26,spore:24,mist:18,glint:20,ember:30,void:16}[pal.part]||14);
+  const kind=sim.weather==="rain"?"rain":pal.part;
+  while(PART.length<want){
+    PART.push({k:kind,x:camX+Math.random()*VW,y:MMH+Math.random()*(GND-MMH),
+      vx:0,vy:0,l:rnd(1,6),s:rnd(.5,1.4)});}
+  while(PART.length>want+30)PART.pop();
+  for(const p of PART){
+    if(p.k!==kind){p.k=kind;p.y=MMH+Math.random()*(GND-MMH);p.x=camX+Math.random()*VW;}
+    if(p.k==="rain"){p.vx=-46;p.vy=210;}
+    else if(p.k==="ember"){p.vx=Math.sin(p.l*3+p.y*.1)*9+4;p.vy=-14;}
+    else if(p.k==="spore"){p.vx=Math.sin(p.l*2)*5;p.vy=-4;}
+    else if(p.k==="glint"){p.vx=1;p.vy=Math.sin(p.l*4)*4;}
+    else if(p.k==="void"){p.vx=-3;p.vy=Math.sin(p.l)*3;}
+    else if(p.k==="mist"){p.vx=7;p.vy=0;}
+    else{p.vx=11;p.vy=-2;}                            // пыль
+    p.x+=p.vx*dt/PPS*1.4;p.y+=p.vy*dt;p.l-=dt;
+    const gy=terr(p.x);
+    if(p.k==="rain"&&p.y>=gy){                        // брызги
+      p.spl=.22;p.y=MMH;p.x=camX+Math.random()*VW;}
+    if(p.spl>0)p.spl-=dt;
+    if(p.l<=0||p.y<MMH-6||p.y>GND+10||p.x<camX-40||p.x>camX+VW+40){
+      p.x=camX+Math.random()*VW;
+      p.y=p.k==="rain"?MMH-Math.random()*40:(p.k==="ember"?terr(p.x)-Math.random()*20:MMH+Math.random()*(GND-MMH));
+      p.l=rnd(1,6);}}}
+function drawParts(camX,pal,W){
+  for(const p of PART){
+    const sx=(p.x-camX)*PPS;
+    if(sx<-10||sx>W+10)continue;
+    if(p.k==="rain"){
+      ctx.fillStyle="rgba(178,196,220,.5)";
+      ctx.fillRect(sx,p.y,1,5);
+      if(p.spl>0){ctx.fillStyle="rgba(178,196,220,.35)";
+        ctx.fillRect(sx-2,terr(p.x)-1,5,1);}}
+    else if(p.k==="ember"){
+      ctx.fillStyle=hash(p.l*7)>.5?"#ff8c2e":"#ffd06a";
+      ctx.fillRect(sx,p.y,1,1);light(sx,p.y,7,"#ff8c2e",.16);}
+    else if(p.k==="glint"){
+      ctx.fillStyle=rgba(pal.acc,.5+.5*Math.sin(p.l*6));ctx.fillRect(sx,p.y,1,1);}
+    else if(p.k==="void"){
+      ctx.fillStyle=rgba(pal.acc,.30);ctx.fillRect(sx,p.y,2,2);}
+    else if(p.k==="spore"){
+      ctx.fillStyle=rgba(pal.acc,.42);ctx.fillRect(sx,p.y,1,1);}
+    else if(p.k==="mist"){
+      ctx.fillStyle="rgba(190,196,204,.10)";ctx.fillRect(sx-8,p.y,20,3);}
+    else{ctx.fillStyle=rgba(pal.acc,.20);ctx.fillRect(sx,p.y,1,1);}}}
+
+// туман полосами: три ленты разной скорости, читается как объём
+function drawFog(camX,pal,t,W,amount){
+  if(amount<=.02)return;
+  for(let L=0;L<3;L++){
+    const y=GND-14-L*22, par=[.3,.5,.75][L];
+    const shift=camX*par+t*[6,11,17][L];
+    ctx.globalAlpha=amount*[.13,.11,.09][L];
+    ctx.fillStyle=mix(pal.skyBot,"#cdd4dc",.5);
+    // клочья разной длины внахлёст: ровный шаг выдаёт кладку
+    const step=34;
+    const i0=Math.floor(shift/step)-2;
+    for(let i=i0;i<i0+Math.ceil(W/step)+4;i++){
+      const bx=i*step-shift+hash(i*3.7+L)*step;
+      const w2=44+hash(i*5.1+L*2)*90, h2=5+hash(i*9.3+L)*9;
+      ctx.fillRect(bx,y+Math.sin(bx*.02+t*.5+L)*4,w2,h2);}}
+  ctx.globalAlpha=1;}
+
+/* --- спрайты: кукла из прямоугольников с общей обводкой --- */
+const OL="#0a0b12";
+const RECTS=[];
+function part(x,y,w,h,c){RECTS.push([x,y,w,h,c]);}
+function flushParts(ox,oy,outline){
+  if(outline!==false){
+    ctx.fillStyle=OL;
+    for(const r of RECTS)ctx.fillRect(ox+r[0]-1,oy+r[1]-1,r[2]+2,r[3]+2);}
+  for(const r of RECTS){ctx.fillStyle=r[4];ctx.fillRect(ox+r[0],oy+r[1],r[2],r[3]);}
+  RECTS.length=0;}
+function shadow(x,gy,w,a){ctx.fillStyle=`rgba(6,7,11,${a||.34})`;
+  ctx.fillRect(x-w/2,gy-1,w,2);}
+
+/* --- странник: кукла со снаряжением и процедурной анимацией --- */
+function drawKnight(sim,x,gy,t,dt){
+  const k=sim.k,A=sim.armory;
+  const dead=k.state==="dead", fight=k.state==="fight";
+  const limp=k.hp<=sim.woundAt;
+  if(dead){
+    shadow(x,gy,26,.4);
+    ctx.fillStyle="#0a0b12";ctx.fillRect(x-13,gy-5,26,4);
+    ctx.fillStyle="#3f3a33";ctx.fillRect(x-11,gy-5,22,2);
+    ctx.fillStyle="#8a3a2a";ctx.fillRect(x-6,gy-2,12,1);
+    return;}
+
+  const mv=k.state==="walk";
+  const rate=mv?(limp?4.6:8.2):1.5;
+  const ph=t*rate;
+  const sw=Math.sin(ph), sw2=Math.sin(ph*2);
+  const bob=mv?Math.abs(sw2)*1.6:Math.sin(t*1.5)*.8;
+  const tilt=mv?sw*.05:0;
+
+  const aC=A["доспех"]?PAL[A["доспех"].pal]:"#7d7a6c";
+  const hC=A["шлем"]?PAL[A["шлем"].pal]:aC;
+  const cC=A["плащ"]?PAL[A["плащ"].pal]:null;
+  const sC=A["меч"]?PAL[A["меч"].pal]:"#6f6a5d";
+  const aD=shade(aC,-.34), aL=shade(aC,.26);
+  const skin="#c2a184", skinD=shade(skin,-.3);
+
+  const H=34;                       // высота фигуры в пикселях буфера
+  const top=gy-H-bob;
+  shadow(x,gy,17,.34);
+
+  ctx.save();
+  ctx.translate(x,gy);ctx.rotate(tilt);ctx.translate(-x,-gy);
+
+  // плащ — инерция: качается позади с задержкой
+  if(cC){
+    const cD=shade(cC,-.32);
+    const lag=Math.sin(ph-.9)*(mv?3:.6);
+    ctx.fillStyle=OL;
+    ctx.beginPath();ctx.moveTo(x-3,top+7);ctx.lineTo(x-9-lag,top+22);
+    ctx.lineTo(x-6-lag*1.5,top+31);ctx.lineTo(x+3,top+24);ctx.closePath();ctx.fill();
+    ctx.fillStyle=cC;
+    ctx.beginPath();ctx.moveTo(x-3,top+8);ctx.lineTo(x-8-lag,top+22);
+    ctx.lineTo(x-6-lag*1.4,top+29);ctx.lineTo(x+2,top+23);ctx.closePath();ctx.fill();
+    ctx.fillStyle=cD;
+    ctx.beginPath();ctx.moveTo(x-6-lag,top+22);ctx.lineTo(x-6-lag*1.4,top+29);
+    ctx.lineTo(x+2,top+23);ctx.closePath();ctx.fill();}
+
+  // дальняя нога и рука
+  const legA=mv?sw*4:0, legB=mv?-sw*4:0;
+  part(-4+legB*.5,22,4,12,aD);
+  part(-4+legB*.5,32,5,3,"#2e2519");
+  // корпус
+  part(-6,8,12,15,aC);
+  part(-6,8,3,15,aL);
+  part(4,8,2,15,aD);
+  part(-7,7,14,3,aD);                       // наплечники
+  part(-6,17,12,3,"#43392b");               // пояс
+  part(-6,20,12,1,shade("#43392b",-.3));
+  // голова
+  part(-4,0,8,8,skin);
+  part(1,0,3,8,skinD);
+  // ближняя нога
+  part(0+legA*.5,22,4,12,aC);
+  part(0+legA*.5,32,5,3,"#2e2519");
+  flushParts(x,top);
+
+  // шлем поверх
+  const hf=A["шлем"]&&A["шлем"].arch.f;
+  if(A["шлем"]){
+    const hD=shade(hC,-.3);
+    if(hf==="great"){
+      part(-5,-1,10,9,hC);part(-5,-1,3,9,shade(hC,.22));part(3,-1,2,9,hD);
+      part(-5,3,10,2,"#0a0b12");}
+    else if(hf==="hood"){
+      part(-6,-1,12,8,hC);part(-3,2,6,5,"#1a1620");part(-6,-1,3,8,shade(hC,.2));}
+    else{part(-5,-2,10,5,hC);part(-6,2,12,2,hD);part(-5,-2,3,5,shade(hC,.22));}
+    flushParts(x,top);}
+  else{ // без шлема видно лицо
+    ctx.fillStyle="#2a2018";ctx.fillRect(x-4,top,8,2);
+    ctx.fillStyle="#1a1410";ctx.fillRect(x-2,top+3,1,1);ctx.fillRect(x+1,top+3,1,1);}
+
+  // рука с оружием и замах
+  const great=A["меч"]&&A["меч"].arch.f==="great";
+  const swing=fight?Math.sin(t*(1/CFG.round)*Math.PI*2):0;
+  const armA=fight?swing*.9:(mv?-sw*.5:0);
+  ctx.save();
+  ctx.translate(x+4,top+10);ctx.rotate(armA);
+  part(-2,-1,4,10,aC);part(-2,-1,1,10,aL);
+  flushParts(0,0);
+  // клинок
+  const bl=great?26:19;
+  ctx.translate(0,8);ctx.rotate(fight?-.9+swing*1.5:-2.35);
+  ctx.fillStyle=OL;ctx.fillRect(-2,-bl-1,5,bl+2);
+  ctx.fillStyle=fight?"#f4ead0":sC;ctx.fillRect(-1,-bl,3,bl);
+  ctx.fillStyle=shade(sC,.35);ctx.fillRect(-1,-bl,1,bl);
+  ctx.fillStyle="#3d3128";ctx.fillRect(-4,-1,9,2);ctx.fillRect(-1,1,3,5);
+  ctx.restore();
+
+  // след от удара
+  if(fight&&Math.abs(swing)>.55){
+    ctx.strokeStyle=`rgba(244,234,208,${(Math.abs(swing)-.55)*.9})`;
+    ctx.lineWidth=2;ctx.beginPath();
+    ctx.arc(x+4,top+18,17,-1.2+swing,-.1+swing);ctx.stroke();}
+
+  ctx.restore();
+
+  // состояния
+  if(A["реликвия"]){const rc=PAL[A["реликвия"].pal];
+    ctx.fillStyle=rc;ctx.fillRect(x-1,top+12,2,2);
+    light(x,top+12,11,rc,.3);}
+  if(k.ward>0){
+    ctx.strokeStyle=`rgba(143,165,200,${.35+.2*Math.sin(t*4)})`;ctx.lineWidth=1;
+    ctx.beginPath();ctx.arc(x,top+18,18,0,7);ctx.stroke();
+    light(x,top+18,24,"#8fa5c8",.18);}
+  if(limp){ctx.fillStyle="#8d2c1e";ctx.fillRect(x-4,top+13,7,1);}
+  if(sim.time<.22||sim.time>.82)light(x,top+16,26,"#e0a24a",.20);}
+
+/* --- противники --- */
+// высота силуэта: полоска здоровья должна держаться головы, а не висеть в воздухе
+const FOEH={beast:15,hunch:22,man:26,tall:35,worm:11,big:32};
+const foeH=f=>(FOEH[f.s]||26)*(f.big?1.5:1);
+function drawFoe(f,x,gy,t,tele){
+  const hurt=f._flash&&f._flash>0;
+  const body=hurt?"#f0e2d6":(f.big?"#3a2438":"#2a1c28");
+  const dark=hurt?"#f0e2d6":shade(body,-.4);
+  const eye=hurt?"#f0e2d6":(f.big?"#ff7a34":"#d4502f");
+  const br=Math.sin(t*2.2+x*.1)*.9;                 // дыхание
+  const lean=tele?Math.sin(t*7)*1.6:0;
+  const sc=f.big?1.5:1;
+  ctx.save();ctx.translate(Math.round(x),Math.round(gy));ctx.scale(sc,sc);
+  shadow(0,0,16,.3);
+  const s=f.s;
+  if(s==="beast"){
+    part(-9,-11+br,17,7,body);part(6,-14+br,6,5,dark);
+    part(-7,-4,3,4,dark);part(3,-4,3,4,dark);
+    part(-11,-9+br,4,2,dark);
+    flushParts(lean,0);
+    ctx.fillStyle=eye;ctx.fillRect(lean+9,-13+br,2,1);}
+  else if(s==="hunch"){
+    part(-7,-15+br,14,10,body);part(-3,-21+br,8,7,dark);
+    part(-6,-5,4,5,dark);part(2,-5,4,5,dark);
+    flushParts(lean,0);
+    ctx.fillStyle=eye;ctx.fillRect(lean-1,-19+br,1,1);ctx.fillRect(lean+2,-19+br,1,1);}
+  else if(s==="man"){
+    part(-5,-18+br,11,11,body);part(-3,-25+br,7,7,dark);
+    part(-4,-7,4,7,dark);part(1,-7,4,7,dark);
+    part(-8,-17+br,3,9,dark);part(6,-17+br,3,9,dark);
+    flushParts(lean,0);
+    ctx.fillStyle=eye;ctx.fillRect(lean-1,-22+br,1,1);ctx.fillRect(lean+2,-22+br,1,1);}
+  else if(s==="tall"){
+    part(-4,-27+br,9,17,body);part(-3,-34+br,7,7,dark);
+    part(-3,-10,3,10,dark);part(1,-10,3,10,dark);
+    part(-8,-26+br,4,14,dark);part(5,-26+br,4,14,dark);
+    flushParts(lean,0);
+    ctx.fillStyle=eye;ctx.fillRect(lean-1,-31+br,1,2);ctx.fillRect(lean+2,-31+br,1,2);}
+  else if(s==="worm"){
+    for(let i=0;i<6;i++){
+      const yy=-6-Math.abs(Math.sin(t*3+i*.7))*4;
+      part(-14+i*5,yy,6,6,i%2?body:dark);}
+    part(15,-9,6,7,dark);
+    flushParts(0,0);
+    ctx.fillStyle=eye;ctx.fillRect(19,-7,2,2);}
+  else{ // big
+    part(-11,-24+br,23,17,body);part(-6,-31+br,13,8,dark);
+    part(-9,-7,7,7,dark);part(3,-7,7,7,dark);
+    part(-16,-22+br,5,13,dark);part(12,-22+br,5,13,dark);
+    flushParts(lean,0);
+    ctx.fillStyle=eye;ctx.fillRect(lean-3,-28+br,2,2);ctx.fillRect(lean+2,-28+br,2,2);
+    light(x,gy-24,26,"#ff7a34",.22);}
+  ctx.restore();
+  if(hurt){ctx.fillStyle="rgba(255,240,220,.35)";
+    ctx.fillRect(x-12*sc,gy-30*sc,24*sc,30*sc);}}
 
 /* --- крепость: растёт влево, координаты мировые и отрицательные --- */
 const KSLOT={hall:-95,gate:-18,well:-150,forge:-215,chap:-285,larder:-345,
@@ -1169,11 +1746,11 @@ function keepLeft(sim){
   if(sim.lost>0)l=Math.min(l,KSLOT.graves-sim.lost*9);
   return l-60;}
 
-const KAG=[{x:-150,pts:[-150,-95],i:0,st:"w",wt:0,t:0,c:"#2b2d38",carry:true},
-           {x:-120,pts:[-120,-60,-100],i:0,st:"w",wt:0,t:0,c:"#33343f",carry:false},
-           {x:-230,pts:[-230,-170],i:0,st:"w",wt:0,t:0,c:"#26283a",carry:false}];
+const KAG=[{x:-150,pts:[-150,-95],i:0,st:"w",wt:0,t:0,c:"#3a3c4a",carry:true},
+           {x:-120,pts:[-120,-60,-100],i:0,st:"w",wt:0,t:0,c:"#44465a",carry:false},
+           {x:-230,pts:[-230,-170],i:0,st:"w",wt:0,t:0,c:"#33354a",carry:false}];
 const HENS=[{x:-130,p:0},{x:-118,p:2},{x:-106,p:4}];
-const DOG={x:-110,tx:-110,wt:0}; const SMOKE=[];
+const DOG={x:-110,tx:-110,wt:0}; const SMOKE=[]; const SPARK=[];
 function tickKeep(dt,sim){
   const lim=keepLeft(sim)+40;
   for(const a of KAG){
@@ -1188,303 +1765,367 @@ function tickKeep(dt,sim){
   DOG.x+=Math.sign(DOG.tx-DOG.x)*Math.min(Math.abs(DOG.tx-DOG.x),22*dt);
   if(Math.random()<dt*10)SMOKE.push({x:0,y:0,vx:rnd(3,9),vy:rnd(-15,-24),l:rnd(2.4,4),r:rnd(1.5,3)});
   for(const s of SMOKE){s.x+=s.vx*dt;s.y+=s.vy*dt;s.l-=dt;s.r+=dt*1.5;}
-  while(SMOKE.length&&SMOKE[0].l<=0)SMOKE.shift();}
+  while(SMOKE.length&&SMOKE[0].l<=0)SMOKE.shift();
+  // искры из кузницы — видно, что лагерь работает, даже когда игрок ничего не делает
+  if(sim.bld.forge>0&&Math.random()<dt*7)
+    SPARK.push({x:0,y:0,vx:rnd(-16,16),vy:rnd(-34,-12),l:rnd(.4,1)});
+  for(const s of SPARK){s.x+=s.vx*dt;s.y+=s.vy*dt;s.vy+=52*dt;s.l-=dt;}
+  while(SPARK.length&&SPARK[0].l<=0)SPARK.shift();}
 
 function walker(x,y,c,ph,carry){
-  const sw=Math.sin(ph*8);ctx.fillStyle=c;
+  const sw=Math.sin(ph*8);
+  ctx.fillStyle=OL;ctx.fillRect(x-3,y-20,7,15);
+  ctx.fillStyle=c;
   ctx.fillRect(x-2,y-14,5,8);ctx.fillRect(x-2,y-19,4,5);
+  ctx.fillStyle=shade(c,.25);ctx.fillRect(x-2,y-14,2,8);
+  ctx.fillStyle=c;
   ctx.fillRect(x-1.5,y-6,2,6+sw*1.5);ctx.fillRect(x+.5,y-6,2,6-sw*1.5);
-  if(carry){ctx.fillStyle="#4a4c58";ctx.fillRect(x+3,y-11,4,4);}}
+  if(carry){ctx.fillStyle="#5a4c38";ctx.fillRect(x+3,y-11,4,4);}}
 
-function drawKeep(sim,camX,light,t){
-  const S=x=>(x-camX)*PPS, B=sim.bld;
-  ctx.fillStyle="#0f1116";
-  const put=(slot,lv,w,h,roof)=>{if(!lv)return;
+function drawKeep(sim,camX,dark,t){
+  const S=x=>(x-camX)*PPS, B=sim.bld, W=cv.width;
+  const wall="#1b1e28", wallL="#262a36", wallD="#12141c", roof="#5e3a22";
+  const put=(slot,lv,w,h,hasRoof)=>{
+    if(!lv)return;
     const x=S(KSLOT[slot]),hh=h+lv*2.2;
-    if(x<-140||x>cv.width+140)return;
-    ctx.fillStyle="#0f1116";ctx.fillRect(x,GND-hh,w,hh);
-    if(roof){ctx.fillStyle="#5e3a22";ctx.fillRect(x-4,GND-hh-7,w+8,8);}
-    if(light<.45){ctx.fillStyle="rgba(226,164,72,.8)";
-      ctx.fillRect(x+w*.4,GND-hh*.6,4,6);}};
+    if(x<-150||x>W+150)return;
+    ctx.fillStyle=wallD;ctx.fillRect(x-1,GND-hh-1,w+2,hh+1);
+    ctx.fillStyle=wall;ctx.fillRect(x,GND-hh,w,hh);
+    ctx.fillStyle=wallL;ctx.fillRect(x,GND-hh,3,hh);      // освещённая грань
+    ctx.fillStyle=wallD;ctx.fillRect(x+w-3,GND-hh,3,hh);
+    // балки — иначе стена читается как чёрный прямоугольник
+    ctx.fillStyle=shade(wall,-.35);
+    for(let r=1;r*11<hh;r++)ctx.fillRect(x,GND-hh+r*11,w,1);
+    if(hasRoof){
+      ctx.fillStyle=shade(roof,-.3);ctx.fillRect(x-5,GND-hh-8,w+10,9);
+      ctx.fillStyle=roof;ctx.fillRect(x-5,GND-hh-8,w+10,3);}
+    // окна светятся ночью — главный источник тепла в кадре
+    const wy=GND-hh*.55;
+    if(dark>.25){
+      ctx.fillStyle=`rgba(240,176,84,${.55+.35*dark})`;
+      ctx.fillRect(x+w*.32,wy,4,5);
+      light(x+w*.32+2,wy+2,26,"#f0a850",.42*dark);}
+    else{ctx.fillStyle="#0d0f16";ctx.fillRect(x+w*.32,wy,4,5);}};
+
   put("forge",B.forge,30,26,true); put("chap",B.chap,22,44,false);
   put("larder",B.larder,24,15,true); put("infi",B.infi,28,26,true);
   put("yard",B.yard,34,12,false); put("tower",B.tower,20,92,false);
   put("libr",B.libr,26,42,true); put("whet",B.whet,14,10,false);
-  if(B.chap){const x=S(KSLOT.chap);ctx.fillStyle="#0f1116";
-    ctx.fillRect(x+10,GND-44-B.chap*2.2-13,3,14);}
+  if(B.chap){const x=S(KSLOT.chap);
+    ctx.fillStyle=wallD;ctx.fillRect(x+9,GND-44-B.chap*2.2-14,5,15);
+    ctx.fillStyle="#c9a34a";ctx.fillRect(x+10,GND-44-B.chap*2.2-13,3,4);}
   // кладбище растёт влево
   for(let i=0;i<Math.min(sim.lost,26);i++){
     const x=S(KSLOT.graves-i*9);
-    if(x<-20||x>cv.width+20)continue;
-    ctx.fillStyle="#2c2e3a";ctx.fillRect(x,GND-11,2,11);ctx.fillRect(x-3,GND-8,8,2);}
+    if(x<-20||x>W+20)continue;
+    ctx.fillStyle="#0f1118";ctx.fillRect(x-1,GND-12,4,12);
+    ctx.fillStyle="#343747";ctx.fillRect(x,GND-11,2,11);ctx.fillRect(x-3,GND-8,8,2);}
   // колодец
   const wx=S(KSLOT.well);
-  if(wx>-40&&wx<cv.width+40){ctx.fillStyle="#0f1116";
-    ctx.fillRect(wx,GND-9,14,9);ctx.fillRect(wx+1,GND-24,2,15);
-    ctx.fillRect(wx+12,GND-24,2,15);ctx.fillRect(wx-2,GND-27,18,4);}
-  // главный дом и ворота
+  if(wx>-40&&wx<W+40){
+    ctx.fillStyle=wallD;ctx.fillRect(wx-1,GND-10,16,10);
+    ctx.fillStyle=wall;ctx.fillRect(wx,GND-9,14,9);
+    ctx.fillStyle=wallL;ctx.fillRect(wx,GND-9,2,9);
+    ctx.fillStyle=wallD;ctx.fillRect(wx+1,GND-24,2,15);ctx.fillRect(wx+12,GND-24,2,15);
+    ctx.fillStyle=roof;ctx.fillRect(wx-2,GND-28,18,4);}
+  // главный дом
   const hx=S(KSLOT.hall);
-  if(hx>-160&&hx<cv.width+60){
-    ctx.fillStyle="#0f1116";ctx.fillRect(hx,GND-74,48,74);ctx.fillRect(hx+30,GND-54,38,54);
-    ctx.fillStyle="#5e3a22";ctx.fillRect(hx+26,GND-62,46,9);
-    ctx.fillStyle="#0f1116";for(let i=0;i<4;i++)ctx.fillRect(hx+2+i*13,GND-82,8,9);
-    if(light<.45){ctx.fillStyle="rgba(226,164,72,.85)";
-      ctx.fillRect(hx+10,GND-64,5,7);ctx.fillRect(hx+34,GND-48,4,6);}}
+  if(hx>-180&&hx<W+70){
+    ctx.fillStyle=wallD;ctx.fillRect(hx-2,GND-76,52,76);
+    ctx.fillStyle=wall;ctx.fillRect(hx,GND-74,48,74);
+    ctx.fillStyle=wallL;ctx.fillRect(hx,GND-74,4,74);
+    ctx.fillStyle=wallD;ctx.fillRect(hx+30,GND-54,38,54);
+    ctx.fillStyle=wall;ctx.fillRect(hx+31,GND-53,36,53);
+    ctx.fillStyle=shade(wall,-.35);
+    for(let r=1;r*13<74;r++)ctx.fillRect(hx,GND-74+r*13,48,1);
+    ctx.fillStyle=roof;ctx.fillRect(hx+26,GND-62,46,9);
+    ctx.fillStyle=shade(roof,-.35);ctx.fillRect(hx+26,GND-56,46,3);
+    ctx.fillStyle=wall;for(let i=0;i<4;i++)ctx.fillRect(hx+2+i*13,GND-82,8,9);
+    ctx.fillStyle=wallD;for(let i=0;i<4;i++)ctx.fillRect(hx+2+i*13,GND-82,8,2);
+    // знамя
+    ctx.fillStyle="#7a2f24";
+    const fl=Math.sin(t*3)*1.5;
+    ctx.fillRect(hx+20,GND-90,1,9);
+    ctx.fillRect(hx+21,GND-90+fl*.3,7,5);
+    if(dark>.2){
+      ctx.fillStyle=`rgba(240,176,84,${.6+.3*dark})`;
+      ctx.fillRect(hx+10,GND-64,5,7);ctx.fillRect(hx+34,GND-48,4,6);
+      light(hx+12,GND-60,40,"#f0a850",.5*dark);
+      light(hx+36,GND-45,30,"#f0a850",.4*dark);}}
+  // ворота
   const gx=S(KSLOT.gate);
-  if(gx>-60&&gx<cv.width+60){ctx.fillStyle="#0f1116";ctx.fillRect(gx,GND-40,16,40);
-    ctx.fillStyle="#07080c";ctx.fillRect(gx+3,GND-30,10,30);}
+  if(gx>-60&&gx<W+60){
+    ctx.fillStyle=wallD;ctx.fillRect(gx-2,GND-42,20,42);
+    ctx.fillStyle=wall;ctx.fillRect(gx,GND-40,16,40);
+    ctx.fillStyle=wallL;ctx.fillRect(gx,GND-40,3,40);
+    ctx.fillStyle="#07080c";ctx.fillRect(gx+3,GND-30,10,30);
+    // факелы у ворот
+    for(const fx of [gx-3,gx+17]){
+      const fl2=1+Math.sin(t*9+fx)*.4;
+      ctx.fillStyle="#2b2d38";ctx.fillRect(fx,GND-26,2,8);
+      ctx.fillStyle="#ffb347";ctx.fillRect(fx-1,GND-30-fl2*2,4,4+fl2*2);
+      light(fx+1,GND-29,32,"#ff9c3c",.30+.16*dark);}}
   // живность
-  for(const h of HENS){const x=S(h.x);if(x<-10||x>cv.width+10)continue;
-    const b=Math.abs(Math.sin(h.p))*2;ctx.fillStyle="#3d3f4b";
-    ctx.fillRect(x,GND-5-b,4,4);ctx.fillRect(x+3,GND-7-b,2,2);}
+  for(const h of HENS){const x=S(h.x);if(x<-10||x>W+10)continue;
+    const b=Math.abs(Math.sin(h.p))*2;
+    ctx.fillStyle=OL;ctx.fillRect(x-1,GND-8-b,7,7);
+    ctx.fillStyle="#4d4f5e";ctx.fillRect(x,GND-5-b,4,4);ctx.fillRect(x+3,GND-7-b,2,2);
+    ctx.fillStyle="#a8442c";ctx.fillRect(x+4,GND-8-b,1,1);}
   const dx=S(DOG.x);
-  if(dx>-20&&dx<cv.width+20){ctx.fillStyle="#43414c";
+  if(dx>-20&&dx<W+20){
+    ctx.fillStyle=OL;ctx.fillRect(dx-1,GND-11,12,9);
+    ctx.fillStyle="#53515c";
     ctx.fillRect(dx,GND-7,8,4);ctx.fillRect(dx+7,GND-10,3,3);
     ctx.fillRect(dx+1,GND-3,1.5,3);ctx.fillRect(dx+5,GND-3,1.5,3);}
-  for(const a of KAG){const x=S(a.x);if(x<-20||x>cv.width+20)continue;
+  for(const a of KAG){const x=S(a.x);if(x<-20||x>W+20)continue;
     walker(x,GND,a.c,a.t,a.carry&&a.i===1);}
-  if(B.forge){const x=S(KSLOT.forge+8),sw=Math.sin(t*3.4);
-    if(x>-20&&x<cv.width+20){ctx.fillStyle="#2b2d38";
+  // кузница: молот и искры
+  if(B.forge){const x=S(KSLOT.forge+8),swg=Math.sin(t*3.4);
+    if(x>-20&&x<W+20){
+      ctx.fillStyle="#2b2d38";
       ctx.fillRect(x,GND-14,5,14);ctx.fillRect(x-8,GND-5,20,5);
-      ctx.fillRect(x+4,GND-14+(sw>0?0:-6),7,2);}}
+      ctx.fillRect(x+4,GND-14+(swg>0?0:-6),7,2);
+      ctx.fillStyle="#ff8c2e";ctx.fillRect(x-4,GND-7,6,2);
+      light(x-1,GND-6,30,"#ff7a2a",.42);
+      for(const s of SPARK){
+        ctx.fillStyle=s.l>.5?"#ffe08a":"#ff8c2e";
+        ctx.fillRect(x-1+s.x,GND-7+s.y,1,1);}}}
   const gvx=S(KSLOT.graves+14),dg=Math.sin(t*1.7);
-  if(gvx>-20&&gvx<cv.width+20&&sim.lost>0){ctx.fillStyle="#2b2d38";
+  if(gvx>-20&&gvx<W+20&&sim.lost>0){ctx.fillStyle="#2b2d38";
     ctx.fillRect(gvx,GND-13-Math.max(0,dg)*2,4,13);ctx.fillRect(gvx+4,GND-10+dg*4,8,2);}
   const smx=S(KSLOT.hall+20);
-  for(const s of SMOKE){ctx.globalAlpha=clamp(s.l/3.4,0,1)*.4;ctx.fillStyle="#9aa0ac";
-    ctx.beginPath();ctx.arc(smx+s.x,GND-86+s.y,s.r,0,7);ctx.fill();}
+  for(const s of SMOKE){ctx.globalAlpha=clamp(s.l/3.4,0,1)*.34;ctx.fillStyle="#9aa0ac";
+    ctx.beginPath();ctx.arc(smx+s.x,GND-88+s.y,s.r,0,7);ctx.fill();}
   ctx.globalAlpha=1;
-  // места занятий — видны только в городе
+  // места занятий
   if(sim.mode==="town"){
     for(const id in SPOT){
       const x=S(SPOT[id]);
-      if(x<-50||x>cv.width+50)continue;
+      if(x<-50||x>W+50)continue;
       const act=sim.pending&&sim.pending.id===id;
-      ctx.fillStyle=act?"#c9a34a":"#2b2d38";
-      ctx.fillRect(x-PIX,GND-5*PIX,2*PIX,5*PIX);
-      ctx.fillRect(x-3*PIX,GND-7*PIX,7*PIX,2*PIX);
-      if(id==="tavern"||id==="rest"||id==="forge"){
-        const fl=1+Math.sin(performance.now()/130+x)*.4;
-        ctx.fillStyle="#d2822c";ctx.fillRect(x+4*PIX,GND-3*PIX-fl*PIX,PIX,2*PIX+fl*PIX);}
-      txt(x,GND-10*PIX,SPOTN[id],act?"#e0c877":"rgba(165,160,148,.8)",10);}}}
+      ctx.fillStyle=OL;ctx.fillRect(x-5,GND-16,11,16);
+      ctx.fillStyle=act?"#c9a34a":"#3a3c4a";
+      ctx.fillRect(x-1,GND-11,3,11);
+      ctx.fillRect(x-4,GND-15,9,4);
+      if(id==="tavern"||id==="rest"||id==="forge"||id==="heal"){
+        const fl2=1+Math.sin(performance.now()/130+x)*.4;
+        ctx.fillStyle="#e0902c";ctx.fillRect(x+5,GND-8-fl2*2,2,3+fl2*2);
+        light(x+6,GND-9,22,"#e0902c",.28+.2*dark);}
+      txt(x,GND-22,SPOTN[id],act?"#e8d089":"rgba(178,172,158,.85)",10);}}}
 
+/* --- цветокоррекция: одна лестница цвета на весь кадр --- */
+const GRADE={r:new Uint8ClampedArray(256),g:new Uint8ClampedArray(256),
+             b:new Uint8ClampedArray(256),key:"",sat:1};
+function buildGrade(l,warm,weather){
+  const key=`${Math.round(l*60)}|${Math.round(warm*40)}|${weather}`;
+  if(GRADE.key===key)return;
+  GRADE.key=key;
+  // ночь холодная и тусклая, рассвет и закат тёплые, полдень нейтральный
+  const gain=[ .54+l*.68+warm*.26, .58+l*.64+warm*.04, .90+l*.28-warm*.20 ];
+  const lift=[ .010+warm*.022, .014+warm*.004, .058-l*.046 ];
+  const gam = 1.18-l*.30;
+  let sat=.50+l*.58+warm*.16;
+  if(weather==="rain"){gain[0]*=.9;gain[1]*=.94;gain[2]*=1.04;sat*=.72;}
+  if(weather==="fog"){sat*=.55;}
+  GRADE.sat=sat;
+  const T=[GRADE.r,GRADE.g,GRADE.b];
+  for(let c=0;c<3;c++)for(let i=0;i<256;i++){
+    let v=i/255;
+    v=Math.pow(v,gam)*gain[c]+lift[c];
+    v=Math.round(clamp(v,0,1)*22)/22;         // ступени — эффект ограниченной палитры
+    T[c][i]=clamp(v,0,1)*255;}}
+function applyGrade(W,H){
+  const img=ctx.getImageData(0,0,W,H), d=img.data;
+  const R=GRADE.r,G=GRADE.g,B=GRADE.b,s=GRADE.sat;
+  for(let i=0;i<d.length;i+=4){
+    let r=d[i],g=d[i+1],b=d[i+2];
+    if(s!==1){const y=(r*77+g*151+b*28)>>8;
+      r=y+(r-y)*s;g=y+(g-y)*s;b=y+(b-y)*s;}
+    d[i]=R[r<0?0:r>255?255:r|0];
+    d[i+1]=G[g<0?0:g>255?255:g|0];
+    d[i+2]=B[b<0?0:b>255?255:b|0];}
+  ctx.putImageData(img,0,0);}
 
-const SPR={"knight": ["......11......", ".....1551.....", "....155551....", "....151151....", "....155551....", ".....1551.....", "...11AAAA11...", "..1LAAAAAAa1..", ".1LAAAAAAAAa1.", ".1LAAAAAAAAa1.", "..1LAAAAAAa1..", "..1BBBBBBBB1..", "..1LAAAAAAa1..", "...1AAAAAA1..."], "legsA": ["...1AA11AA1...", "..1AA1..1AA1..", ".1AA1....1AA1.", ".1AA1....1AA1.", ".1BB1....1BB1.", ".111......111."], "legsB": ["...1AA11AA1...", "...1AA11AA1...", "...1AA11AA1...", "...1AA11AA1...", "...1BB11BB1...", "...111..111..."], "helmCap": ["......11......", ".....1HHH1....", "....1HHHHH1...", "....1H555H1...", "....1H515H1...", "....1H555H1...", ".....15551...."], "helmGreat": ["....111111....", "...1HHHHHH1...", "..1HHHHHHHH1..", "..1HH1111HH1..", "..1HHHHHHHH1..", "..1HhhhhhhH1..", "...11111111..."], "helmHood": ["......11......", ".....1CCC1....", "....1CCCCC1...", "...1CC555CC1..", "...1CC515CC1..", "...1CC555CC1..", "....1C555C1..."], "cape": [".111.", "1CCC1", "1CCC1", "1CCC1", "1cCC1", "1cCC1", "1ccC1", "1ccc1", ".111."], "swordLong": ["..1..", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", "1SSS1", ".111.", ".1G1.", ".1G1.", ".111."], "swordGreat": ["..1..", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", ".1S1.", "1SSS1", "11111", ".1G1.", ".1G1.", ".111."], "foeBeast": ["...........11.", "..1111....1EE1", ".1DDDD111DDDD1", "1DDDDDDDDDDDD1", "1DDDDDDDDDDD1.", ".1DD11DD11DD1.", ".1D1..1D1.1D1.", ".111..111.111."], "foeHunch": [".....111......", "....1DDD1.....", "...1EDDDE1....", "...1DDDDD1....", "..11DDDDD11...", ".1DDDDDDDDD1..", ".1DDDDDDDDD1..", ".1DDDDDDDD1...", "..1DD11DD1....", "..1D1..1D1....", "..111..111...."], "foeMan": [".....111......", "....1DDD1.....", "....1E1E1.....", "....1DDD1.....", "..111DDD111...", ".1DDDDDDDDD1..", ".1DDDDDDDDD1..", ".1DD1DDD1DD1..", ".11.1DDD1.11..", "....1D1D1.....", "....1D1D1.....", "...11...11....", "...11...11...."], "foeTall": [".....111......", "....1DDD1.....", "....1E1E1.....", "....1DDD1.....", ".1..11D11..1..", "1D1.1DDD1.1D1.", "1D1.1DDD1.1D1.", "1D1.1DDD1.1D1.", "1D111DDD111D1.", ".1111DDD1111..", "....1D1D1.....", "....1D1D1.....", "....1D1D1.....", "...11...11....", "...11...11...."], "foeWorm": ["..........111.", ".........1EEE1", "111111111DDDD1", "1DDDDDDDDDDDD1", "1DDDDDDDDDDD1.", ".11111111111.."], "foeBig": ["...11....11...", "..1DD1..1DD1..", "..1DDD11DDD1..", ".11DDDDDDDD11.", "1DD1EE11EE1DD1", "1DDDDDDDDDDDD1", "1DDDDDDDDDDDD1", "1DD1DDDDDD1DD1", "11.1DDDDDD1.11", "...1DD11DD1...", "...1DD11DD1...", "...11....11..."]};
+/* --- виньетка и зерно --- */
+const VIG={c:null};
+function vignette(W,H){
+  if(!VIG.c||VIG.w!==W||VIG.h!==H){
+    const c=document.createElement("canvas");c.width=W;c.height=H;
+    const g=c.getContext("2d");
+    const gr=g.createLinearGradient(0,0,W,0);
+    gr.addColorStop(0,"rgba(6,7,12,.46)");gr.addColorStop(.16,"rgba(6,7,12,0)");
+    gr.addColorStop(.84,"rgba(6,7,12,0)");gr.addColorStop(1,"rgba(6,7,12,.46)");
+    g.fillStyle=gr;g.fillRect(0,0,W,H);
+    const gv=g.createLinearGradient(0,0,0,H);
+    gv.addColorStop(0,"rgba(6,7,12,.20)");gv.addColorStop(.26,"rgba(6,7,12,0)");
+    gv.addColorStop(.80,"rgba(6,7,12,0)");gv.addColorStop(1,"rgba(6,7,12,.34)");
+    g.fillStyle=gv;g.fillRect(0,0,W,H);
+    VIG.c=c;VIG.w=W;VIG.h=H;}
+  ctx.drawImage(VIG.c,0,0,W,H,0,0,cv.width,HC);}
 
-// попиксельная отрисовка: каждый символ карты — один пиксель экрана
-function blit(map,x,y,pal){
-  for(let r=0;r<map.length;r++){const row=map[r];
-    for(let c=0;c<row.length;c++){
-      const ch=row[c]; if(ch===".")continue;
-      const col=pal[ch]; if(!col)continue;
-      ctx.fillStyle=col; ctx.fillRect(x+c*PIX,y+r*PIX,PIX,PIX);}}}
-function sprW(m){return m[0].length*PIX;}
-function sprH(m){return m.length*PIX;}
+const NOISE={c:null};
+function grain(W,H,amount){
+  if(amount<.02)return;
+  if(!NOISE.c){
+    const s=128,c=document.createElement("canvas");c.width=c.height=s;
+    const g=c.getContext("2d"),img=g.createImageData(s,s),d=img.data;
+    for(let i=0;i<d.length;i+=4){
+      const v=hash(i*.37)*255;
+      d[i]=d[i+1]=d[i+2]=v;d[i+3]=40;}
+    g.putImageData(img,0,0);NOISE.c=c;}
+  ctx.globalAlpha=amount;
+  const ox=Math.floor(hash(performance.now()*.01)*100);
+  for(let x=-ox;x<cv.width;x+=128)ctx.drawImage(NOISE.c,x,MMH,128,128);
+  ctx.globalAlpha=1;}
 
-/* --- рыцарь: настоящий спрайт с обводкой, доспехом и циклом ходьбы --- */
-const OL="#0a0b10";
-function drawKnight(sim,x,gy,t){
-  const k=sim.k,A=sim.armory;
-  const limp=k.hp<=sim.woundAt,dead=k.state==="dead",fight=k.state==="fight";
-  const W=sprW(SPR.knight), ox=Math.round(x-W/2);
-  if(dead){shadow(x,gy,W*.9);
-    ctx.fillStyle="#0a0b10";ctx.fillRect(ox+PIX,gy-3*PIX,W-2*PIX,2*PIX);
-    ctx.fillStyle="#3f3a33";ctx.fillRect(ox+2*PIX,gy-3*PIX,W-4*PIX,PIX);return;}
-
-  const mv=k.state==="walk"||k.state==="idle", rate=k.state==="idle"?1.6:(limp?4.4:8.4);
-  const step=mv?(Math.sin(t*rate)>0?1:0):1;
-  const bob=mv&&Math.abs(Math.sin(t*rate))>.8?PIX:0;
-  const top=gy-sprH(SPR.knight)-sprH(SPR.legsA)+bob;
-
-  const aC=A["доспех"]?PAL[A["доспех"].pal]:"#8b8778";
-  const hC=A["шлем"]?PAL[A["шлем"].pal]:aC;
-  const cC=A["плащ"]?PAL[A["плащ"].pal]:null;
-  const sC=A["меч"]?PAL[A["меч"].pal]:"#6f6a5d";
-  const P={"1":OL,"5":"#c9b596","A":aC,"a":shade(aC,-.32),"L":shade(aC,.24),
-           "B":"#43392b","H":hC,"h":shade(hC,-.3),"C":cC||"#5a4a44",
-           "c":shade(cC||"#5a4a44",-.3),"S":fight?"#f6ecd2":sC,"G":"#3d3128"};
-  shadow(x,gy,W*.62);
-
-  // плащ за спиной
-  if(cC)blit(SPR.cape,ox-3*PIX,top+6*PIX,P);
-  // тело и ноги
-  blit(SPR.knight,ox,top,P);
-  blit(step?SPR.legsA:SPR.legsB,ox,top+sprH(SPR.knight),P);
-  // шлем поверх головы
-  const hf=A["шлем"]&&A["шлем"].arch.f;
-  if(hf==="great")blit(SPR.helmGreat,ox,top,P);
-  else if(hf==="hood")blit(SPR.helmHood,ox,top,P);
-  else if(A["шлем"])blit(SPR.helmCap,ox,top,P);
-  // меч
-  const great=A["меч"]&&A["меч"].arch.f==="great";
-  const sm=great?SPR.swordGreat:SPR.swordLong;
-  const sw=fight?Math.sin(t*(1/CFG.round)*Math.PI*2):0;
-  blit(sm,ox+W-2*PIX+Math.round(sw*2)*PIX,
-       top+4*PIX-(great?3*PIX:0)+Math.round(Math.abs(sw)*2)*PIX,P);
-  // реликвия
-  if(A["реликвия"]){ctx.fillStyle=PAL[A["реликвия"].pal];
-    ctx.fillRect(ox+6*PIX,top+9*PIX,2*PIX,PIX);}
-  if(k.ward>0){ctx.strokeStyle="rgba(143,165,200,.5)";ctx.lineWidth=PIX;
-    ctx.beginPath();ctx.arc(x,top+11*PIX,W*.72,0,7);ctx.stroke();}
-  if(limp){ctx.fillStyle="#8d2c1e";ctx.fillRect(ox+3*PIX,top+9*PIX,7*PIX,PIX);}}
-
-/* --- противники: свои силуэты, обводка, вспышка при попадании --- */
-const FOEMAP={beast:"foeBeast",hunch:"foeHunch",man:"foeMan",
-              tall:"foeTall",worm:"foeWorm",big:"foeBig"};
-function drawFoe(f,x,gy,t){
-  const m=SPR[FOEMAP[f.s]]||SPR.foeMan;
-  const hurt=f._flash&&f._flash>0;
-  const body=hurt?"#f0e2d6":(f.big?"#3a2438":"#2b1d2a");
-  const P={"1":hurt?"#f0e2d6":"#0d080f","D":body,
-           "E":hurt?"#f0e2d6":(f.big?"#e0642f":"#c04a2f")};
-  const w=sprW(m);
-  shadow(x+w/2,gy,w*.7);
-  const wob=f.s==="worm"?Math.round(Math.sin(t*4))*PIX:0;
-  blit(m,Math.round(x),gy-sprH(m)+wob,P);}
-
-/* --- лента всей дороги сверху --- */
+/* --- лента всей дороги --- */
 function drawMinimap(sim,camX){
-  const ctx=view;
-  const W=cv.width, L=keepLeft(sim), R=Math.max(sim.record,700)+250;
+  const c=view, W=cv.width, L=keepLeft(sim), R=Math.max(sim.record,700)+250;
   const S=x=>((x-L)/(R-L))*W;
-  ctx.fillStyle="#0b0c10";ctx.fillRect(0,0,W,MMH);
+  c.fillStyle="#07080c";c.fillRect(0,0,W,MMH);
   for(let i=0;i<BIOMES.length;i++){
     const a=S(BIOMES[i].from), b=i+1<BIOMES.length?S(BIOMES[i+1].from):W;
-    ctx.fillStyle=BIOMES[i].skyBot;ctx.globalAlpha=.5;ctx.fillRect(a,3,Math.max(1,b-a),MMH-6);}
-  ctx.globalAlpha=1;
-  ctx.fillStyle="#3d4a38";ctx.fillRect(0,3,Math.max(2,S(0)),MMH-6);
+    c.fillStyle=BIOMES[i].skyBot;c.globalAlpha=.42;c.fillRect(a,3,Math.max(1,b-a),MMH-6);
+    c.globalAlpha=.9;c.fillStyle=BIOMES[i].acc;c.fillRect(a,3,1,MMH-6);}
+  c.globalAlpha=1;
+  c.fillStyle="#3d4a38";c.fillRect(0,3,Math.max(2,S(0)),MMH-6);
   for(const g of sim.graves){const x=S(g.d);
-    ctx.fillStyle=((g.loot>0||(g.items||[]).length)?"#d8b34a":"#4a4c58");
-    ctx.fillRect(x,MMH-6,1,4);}
-  for(const d of sim.stations){ctx.fillStyle="#d2822c";ctx.fillRect(S(d)-1,2,2,MMH-4);}
-  // окно камеры
+    c.fillStyle=((g.loot>0||(g.items||[]).length)?"#d8b34a":"#4a4c58");
+    c.fillRect(x,MMH-6,1,4);}
+  for(const d of sim.stations){c.fillStyle="#d2822c";c.fillRect(S(d)-1,2,2,MMH-4);}
   const a=S(camX), b=S(camX+VW);
-  ctx.strokeStyle="rgba(200,196,186,.35)";ctx.lineWidth=1;
-  ctx.strokeRect(a,1.5,Math.max(3,b-a),MMH-3);
-  // рыцарь
-  ctx.fillStyle="#e6e0cf";ctx.fillRect(S(sim.k.dist)-1,1,3,MMH-2);
-  ctx.fillStyle="#1e1f25";ctx.fillRect(0,MMH,W,1);}
+  c.strokeStyle="rgba(214,210,198,.45)";c.lineWidth=1;
+  c.strokeRect(a,1.5,Math.max(3,b-a),MMH-3);
+  c.fillStyle="#f0ead8";c.fillRect(S(sim.k.dist)-1,1,3,MMH-2);
+  c.fillStyle="#1e1f25";c.fillRect(0,MMH,W,1);}
 
-/* --- главный кадр --- */
-function drawWorld(sim,camX,light,t){
-  const W=cv.width, k=sim.k;
+/* --- кадр --- */
+let _lastT=0;
+function drawWorld(sim,camX,dark,t,W){
+  const k=sim.k;
   const pal=visPal(camX+VW*.35);
-  drawSky(pal,off.width,Math.ceil(GND/PIX));
-  ctx.fillStyle=pal.skyBot;ctx.fillRect(0,GND-1,W,3);
-  if(light<.4){ctx.fillStyle=`rgba(216,222,240,${(.4-light)*1.1})`;
-    for(let i=0;i<30;i++)ctx.fillRect(hash(i)*W,MMH+hash(i*3.7)*70,1,1);}
-  // горизонт
-  ctx.fillStyle=mix(pal.far,pal.skyBot,.30);ctx.beginPath();ctx.moveTo(0,GND);
-  for(let x=0;x<=W;x+=6){const wx=camX*.18+x/PPS;const st=pal.prop;let y;
-    if(st==="rock")y=60+Math.sin(wx/260)*28+Math.sin(wx/90)*9;
-    else if(st==="tree")y=42+hash(Math.floor(wx/22))*24;
-    else if(st==="cross")y=32+(hash(Math.floor(wx/70))>.6?24:0);
-    else if(st==="crystal")y=28+(hash(Math.floor(wx/110))>.55?40:4);
-    else if(st==="stump")y=24+(hash(Math.floor(wx/95))>.65?44:2);
-    else y=26+Math.sin(wx/300)*6;
-    ctx.lineTo(x,GND-y);}
-  ctx.lineTo(W,GND);ctx.closePath();ctx.fill();
-  // растительность в мировых координатах
-  const SL=30;
-  for(const L of [0,1]){
-    const par=[.58,.74][L],sc=[.72,1][L],al=1;
-    const layPal=L===0?{...pal,mid:mix(pal.mid,pal.skyBot,.34),grass:mix(pal.grass,pal.skyBot,.3)}:pal;
-    const s0=Math.floor((camX*par)/SL)-2;ctx.globalAlpha=al;
-    for(let i=s0;i<s0+Math.ceil(W/(SL*PPS*par))+4;i++){
-      const wx=i*SL+hash(i*2.1)*SL*.8;
-      if(wx<40)continue;
-      const sx=(wx-camX*par)*PPS;
-      if(sx<-80||sx>W+80)continue;
-      const bp=visPal(wx);
-      if(bp.prop==="none"||hash(i*7.3+L*31.7)>clamp(bp.dens*.42,0,.95))continue;
-      const pp=L===0?{...bp,mid:mix(bp.mid,pal.skyBot,.34),grass:mix(bp.grass,pal.skyBot,.3)}:bp;
-      ctx.save();ctx.translate(sx,terr(wx));ctx.scale(sc,sc);prop(bp.prop,0,0,i*3+L*11,pp);ctx.restore();}}
-  ctx.globalAlpha=1;
-  // земля
-  ctx.fillStyle=pal.gnd;ctx.beginPath();ctx.moveTo(0,HC);
-  for(let x=0;x<=W;x+=4)ctx.lineTo(x,terr(camX+x/PPS));
-  ctx.lineTo(W,HC);ctx.closePath();ctx.fill();
-  const GS=10,g0=Math.floor(camX/GS)-2;
-  for(let i=g0;i<g0+Math.ceil(W/(GS*PPS))+4;i++){
-    const wx=i*GS+hash(i*5.3)*GS*.7,sx=(wx-camX)*PPS;
-    if(sx<-12||sx>W+12)continue;
-    const bs=visPal(wx),gy=terr(wx);
-    if(hash(i*11.9)<clamp(bs.dens*.5,0,.85)){ctx.fillStyle=bs.grass;
-      const hh=2+hash(i*13.1)*5;ctx.fillRect(sx,gy-hh,1.5,hh);}}
-  for(let x=0;x<=W;x+=2){const wx=camX+x/PPS,gy=terr(wx);
-    ctx.fillStyle=shade(visPal(wx).gnd,.22);ctx.fillRect(x,gy-2,2,2);
-    ctx.fillStyle=shade(visPal(wx).gnd,-.28);ctx.fillRect(x,gy+3,2,3);}
+  const raw=clamp(.5+.5*Math.sin((sim.time-.25)*Math.PI*2),0,1);
+  const horizon=mix(mix("#141a28",pal.skyBot,Math.pow(raw,.7)),"#f0b060",
+                    Math.max(0,1-Math.abs(raw-.5)*4)*.5);
 
-  drawKeep(sim,camX,light,t);
+  drawSky(pal,sim.time,sim.weather,off.width,off.height);
+  drawStars(camX,dark,t,W);
+  drawLuminary(sim,sim.time,W);
+  drawClouds(camX,pal,sim.time,sim.weather,t,W);
+  drawRidges(camX,pal,horizon,W);
+  drawGround(sim,camX,pal,t,W);
+  drawProps(camX,pal,W,t);
+  drawKeep(sim,camX,dark,t);
 
   const S=x=>(x-camX)*PPS;
+  // арки на границах биомов
   for(const b of BIOMES){if(b.from<=0)continue;
-    const sx=S(b.from);if(sx<-60||sx>W+60)continue;
-    const gy=terr(b.from);ctx.fillStyle="#0b0c10";
-    ctx.fillRect(sx-24,gy-40,6,40);ctx.fillRect(sx+18,gy-40,6,40);ctx.fillRect(sx-28,gy-47,56,8);
-    txt(sx,gy-52,b.name.toLowerCase(),b.acc,10);}
+    const sx=S(b.from);if(sx<-70||sx>W+70)continue;
+    const gy=terr(b.from);
+    ctx.fillStyle="#0b0c12";
+    ctx.fillRect(sx-26,gy-44,7,44);ctx.fillRect(sx+19,gy-44,7,44);ctx.fillRect(sx-30,gy-52,60,9);
+    ctx.fillStyle=shade(b.acc,-.5);
+    ctx.fillRect(sx-25,gy-44,2,44);ctx.fillRect(sx+20,gy-44,2,44);
+    ctx.fillStyle=b.acc;ctx.globalAlpha=.5;ctx.fillRect(sx-28,gy-51,56,1);ctx.globalAlpha=1;
+    light(sx,gy-46,34,b.acc,.20);
+    txt(sx,gy-58,b.name.toLowerCase(),b.acc,10);}
+  // привалы
   for(const d of sim.stations){const sx=S(d);if(sx<-60||sx>W+60)continue;
-    const gy=terr(d);ctx.fillStyle="#0f1116";
-    ctx.fillRect(sx-15,gy-22,30,22);ctx.fillRect(sx-19,gy-25,38,4);
-    const fl=1+Math.sin(t*9+sx)*.35;ctx.fillStyle="#d2822c";ctx.fillRect(sx+21,gy-5-fl*4,5,4+fl*4);}
+    const gy=terr(d);
+    ctx.fillStyle="#0b0c12";ctx.fillRect(sx-16,GND-24,33,24);
+    ctx.fillStyle="#1b1e28";ctx.fillRect(sx-15,gy-22,30,22);
+    ctx.fillStyle="#5e3a22";ctx.fillRect(sx-19,gy-25,38,4);
+    const fl=1+Math.sin(t*9+sx)*.35;
+    ctx.fillStyle="#ffb347";ctx.fillRect(sx+21,gy-6-fl*4,5,5+fl*4);
+    light(sx+23,gy-8,36,"#ff9c3c",.44);}
+  // могилы
   for(const g of sim.graves){const sx=S(g.d);if(sx<-20||sx>W+20)continue;
     const gy=terr(g.d),hl=g.loot>0||((g.items||[]).length>0);
-    ctx.fillStyle=g.old?"#1e2029":(hl?"#6a6046":"#2c2e3a");
-    ctx.fillRect(sx,gy-12,2,12);ctx.fillRect(sx-3,gy-9,8,2);
+    ctx.fillStyle="#0b0c12";ctx.fillRect(sx-1,gy-14,5,14);
+    ctx.fillStyle=g.old?"#282b36":(hl?"#7a6e4e":"#363948");
+    ctx.fillRect(sx,gy-13,2,13);ctx.fillRect(sx-3,gy-10,8,2);
     if(hl){ctx.fillStyle="#d8b34a";ctx.globalAlpha=.5+.5*Math.sin(t*4);
-      ctx.fillRect(sx-1,gy-16,4,2);ctx.globalAlpha=1;}}
+      ctx.fillRect(sx-1,gy-18,4,2);ctx.globalAlpha=1;
+      light(sx+1,gy-17,20,"#d8b34a",.28);}}
+  // случаи на дороге
   const OC={cache:"#d8b34a",prov:"#8fbf6a",rest:"#e08a3c",avoid:"#8fa5c8"};
   const OT={cache:"схрон",prov:"припас",rest:"привал",avoid:"обход"};
   for(const o of sim.opps){const sx=S(o.x);if(sx<-30||sx>W+30)continue;
     o._sx=sx;const gy=terr(o.x);
     const pu=.6+.4*Math.sin(t*6),fr=clamp(o.ttl/CFG.oppTtl,0,1);
     ctx.globalAlpha=pu;ctx.fillStyle=OC[o.kind];
-    ctx.beginPath();ctx.moveTo(sx,gy-38);ctx.lineTo(sx+5,gy-32);
-    ctx.lineTo(sx,gy-26);ctx.lineTo(sx-5,gy-32);ctx.closePath();ctx.fill();ctx.globalAlpha=1;
+    ctx.beginPath();ctx.moveTo(sx,gy-42);ctx.lineTo(sx+5,gy-36);
+    ctx.lineTo(sx,gy-30);ctx.lineTo(sx-5,gy-36);ctx.closePath();ctx.fill();ctx.globalAlpha=1;
     ctx.strokeStyle=OC[o.kind];ctx.lineWidth=2;
-    ctx.beginPath();ctx.arc(sx,gy-32,11,-Math.PI/2,-Math.PI/2+fr*Math.PI*2);ctx.stroke();
-    txt(sx,gy-46,OT[o.kind],OC[o.kind],10);}
+    ctx.beginPath();ctx.arc(sx,gy-36,11,-Math.PI/2,-Math.PI/2+fr*Math.PI*2);ctx.stroke();
+    light(sx,gy-36,22,OC[o.kind],.22);
+    txt(sx,gy-50,OT[o.kind],OC[o.kind],10);}
+
   const kx=Math.round(S(k.dist)),kgy=terr(k.dist);
   (sim.wave||[]).forEach((f,i)=>{
-    const fw=k.state==="tele"?f.x:k.dist+26+i*20;
+    const fw=k.state==="tele"?f.x:k.dist+13+i*14;
     const fx=S(fw),fgy=terr(fw);
-    drawFoe(f,fx,fgy,t);
-    if(k.state==="tele")txt(fx+6,fgy-40,"!","#c0705c",12);
-    if(k.state==="fight"){const w=f.big?40:26,fr=clamp(f.hp/f.max,0,1);
-      ctx.fillStyle="#1e1f25";ctx.fillRect(fx-4,fgy-44,w,3);
-      ctx.fillStyle=f.big?"#c04a2a":"#8a3a2a";ctx.fillRect(fx-4,fgy-44,w*fr,3);
-      if(i===0)txt(fx+6,fgy-48,f.nm,"rgba(200,196,186,.75)",10);}});
+    if(fx<-60||fx>W+60)return;
+    drawFoe(f,fx,fgy,t,k.state==="tele");
+    if(k.state==="tele")txt(fx+6,fgy-foeH(f)-9,"!","#e05a3c",13);
+    if(k.state==="fight"){
+      const w=f.big?40:24,fr=clamp(f.hp/f.max,0,1),by=fgy-foeH(f)-7;
+      ctx.fillStyle="#0b0c12";ctx.fillRect(fx-5,by-1,w+2,5);
+      ctx.fillStyle="#22242e";ctx.fillRect(fx-4,by,w,3);
+      ctx.fillStyle=f.big?"#d4552a":"#a04030";ctx.fillRect(fx-4,by,w*fr,3);
+      if(i===0)txt(fx+6,by-5,f.nm,"rgba(214,210,198,.8)",10);}});
   drawKnight(sim,kx,kgy,t);
-  if(k.state==="busy")txt(kx,kgy-36,k.busy,"rgba(226,221,206,.8)",10);
-  for(const f of sim.floats)
-    txt(kx+f.x,kgy-34+f.y,f.txt,f.col,11);
-  txt(W-10,HC-10,sim.mode==="town"?"город":pal.name.toLowerCase(),"rgba(150,146,136,.6)",11,"right");
-  if(sim.mode==="town")txt(14,HC-10,`день ${sim.day}`,"rgba(201,163,74,.75)",11,"left");}
+  if(k.state==="busy")txt(kx,kgy-44,k.busy,"rgba(232,227,212,.85)",10);
+  for(const f of sim.floats)txt(kx+f.x,kgy-42+f.y,f.txt,f.col,11);
 
-function render(sim,camX){
+  drawForeground(camX,pal,t,W);
+  if(sim.weather==="fog")drawFog(camX,pal,t,W,1);
+  else if(bIdx(camX)>=2)drawFog(camX,pal,t,W,.35);
+  drawParts(camX,pal,W);
+
+  txt(cv.width-12,HC-9,sim.mode==="town"?"город":pal.name.toLowerCase(),
+      "rgba(168,163,150,.7)",11,"right");
+  if(sim.mode==="town")txt(14,HC-9,`день ${sim.day}`,"rgba(214,176,90,.85)",11,"left");
+}
+
+function render(sim,cx){
   const W=cv.width,t=performance.now()/1000;
-  TXT.length=0;
-  const raw=.5+.5*Math.sin((sim.time-.25)*Math.PI*2);
-  const light=Math.pow(raw,.65),warm=Math.max(0,1-Math.abs(raw-.5)*4);
+  const dt=Math.min(.05,Math.max(0,t-_lastT));_lastT=t;
+  TXT.length=0;LIGHTS.length=0;
+  const raw=clamp(.5+.5*Math.sin((sim.time-.25)*Math.PI*2),0,1);
+  const l=Math.pow(raw,.7);
+  const warm=Math.max(0,1-Math.abs(raw-.5)*4);
+  const dark=1-l;
+
+  tickParts(sim,cx,dt,visPal(cx+VW*.35),W);
   ctx.save();
-  if(sim.shake)ctx.translate(rnd(-sim.shake,sim.shake)*.3,0);
-  drawWorld(sim,camX,light,t);
+  if(sim.shake)ctx.translate(rnd(-sim.shake,sim.shake)*.4,rnd(-sim.shake,sim.shake)*.15);
+  drawWorld(sim,cx,dark,t,W);
   ctx.restore();
-  ctx.fillStyle=`rgba(10,14,32,${(1-light)*.32})`;ctx.fillRect(0,MMH,W,HC-MMH);
-  if(warm>.02){ctx.fillStyle=`rgba(190,95,35,${warm*.10})`;ctx.fillRect(0,MMH,W,HC-MMH);}
-  // блит с укрупнением пикселя
+
+  drawLights(dark);
+  buildGrade(l,warm,sim.weather);
+  applyGrade(off.width,off.height);
+  vignette(off.width,off.height);
+  grain(W,HC,dark*.05+.012);
+
   view.imageSmoothingEnabled=false;
   view.clearRect(0,0,W,HC);
   view.drawImage(off,0,0,off.width,off.height,0,0,W,HC);
-  // текст поверх, чётким
-  for(const e of TXT){view.font=e.size+"px ui-monospace,Menlo,monospace";
-    view.textAlign=e.align;view.fillStyle=e.col;view.fillText(e.s,e.x,e.y);}
-  drawMinimap(sim,camX);
+
+  for(const e of TXT){
+    view.font=e.size+"px ui-monospace,Menlo,monospace";
+    view.textAlign=e.align;
+    view.fillStyle="rgba(6,7,12,.75)";                 // подложка, иначе текст тонет
+    view.fillText(e.s,e.x+1,e.y+1);
+    view.fillStyle=e.col;view.fillText(e.s,e.x,e.y);}
+  drawMinimap(sim,cx);
   if(sim.banner){const a=Math.min(1,sim.banner.life/1.2);
     view.font="12px ui-monospace,Menlo,monospace";view.textAlign="left";
     const w=view.measureText(sim.banner.t).width;
-    view.fillStyle=`rgba(12,14,20,${a*.55})`;view.fillRect(9,MMH+8,w+10,18);
-    view.fillStyle=`rgba(226,221,206,${a*.95})`;view.fillText(sim.banner.t,14,MMH+21);}}
+    view.fillStyle=`rgba(9,10,16,${a*.7})`;view.fillRect(9,MMH+8,w+12,19);
+    view.fillStyle=`rgba(201,163,74,${a*.5})`;view.fillRect(9,MMH+8,2,19);
+    view.fillStyle=`rgba(232,227,212,${a*.95})`;view.fillText(sim.banner.t,16,MMH+22);}}
 
 /* ==================== ИНТЕРФЕЙС ==================== */
 const el=id=>document.getElementById(id);
@@ -1752,11 +2393,16 @@ document.querySelectorAll(".px").forEach(b=>b.onclick=()=>{
 if(!loaded){el("intro").style.display="";
   el("introOk").onclick=()=>{el("intro").style.display="none";save();};}
 
+// наружу — для tools/shot.mjs. В headless-проверках window нет, поэтому под условием.
+if(typeof window!=="undefined")
+  Object.assign(window,{sim,SLOTS,BIOMES,makeItem,setPix,CFG,applyScale});
+
 let last=performance.now();
 function loop(now){
   let dt=(now-last)/1000;last=now;dt=Math.min(dt,.1);
   if(!paused)for(let i=0;i<speed;i++)sim.tick(dt);
   tickKeep(dt*Math.min(speed,4),sim);
+  applyScale(sim);            // масштаб зависит от режима, считаем до камеры
   render(sim,camX());ui();
   requestAnimationFrame(loop);}
 fit();requestAnimationFrame(loop);

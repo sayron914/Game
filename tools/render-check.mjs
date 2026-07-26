@@ -21,7 +21,8 @@ function mkCtx() {
     get strokeStyle() { return this._s; },
   };
   const geo = ["fillRect","clearRect","moveTo","lineTo","arc","translate","scale",
-               "rotate","setTransform","drawImage","strokeRect","putImageData"];
+               "rotate","setTransform","drawImage","strokeRect","putImageData",
+               "rect","ellipse","quadraticCurveTo","bezierCurveTo","clip"];
   for (const m of geo) c[m] = (...a) => {
     ops++;
     for (const v of a) if (typeof v === "number" && !isFinite(v)) errs.push(`${m}: NaN`);
@@ -30,7 +31,16 @@ function mkCtx() {
   c.fillText = (t, x, y) => { ops++; if (!isFinite(x) || !isFinite(y)) errs.push("fillText: NaN"); };
   c.measureText = () => ({ width: 40 });
   c.createImageData = (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) });
-  c.createLinearGradient = () => ({ addColorStop: (o, col) => { if (bad(col)) errs.push("gradient " + col); } });
+  // цветокоррекция читает кадр обратно — без этого движок падает на первом же кадре
+  c.getImageData = (x, y, w, h) => {
+    ops++;
+    if (![x, y, w, h].every(Number.isFinite)) errs.push("getImageData: NaN");
+    return { width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) };
+  };
+  const grad = () => ({ addColorStop: (o, col) => { if (bad(col)) errs.push("gradient " + col); } });
+  c.createLinearGradient = grad;
+  c.createRadialGradient = grad;
+  c.createPattern = () => null;
   return c;
 }
 const els = {};
