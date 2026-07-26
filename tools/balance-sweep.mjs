@@ -19,7 +19,7 @@ const STYLES = {
   "осторожный":  { pickFar: false, heal: true,  splint: true,  train: true,  greed: .4 },
   "жадный":      { pickFar: true,  heal: false, splint: true,  train: true,  greed: .9 },
   "бережливый":  { pickFar: false, heal: true,  splint: true,  train: false, greed: .3 },
-  "безрассудный":{ pickFar: true,  heal: false, splint: false, train: true,  greed: 1  },
+  "безрассудный":{ pickFar: true,  heal: false, splint: false, train: true,  greed: 1, risk: true },
 };
 
 function run(st) {
@@ -48,6 +48,7 @@ function run(st) {
       }
       if (!s.pending && s.contract) s.depart();
     }
+    if (st.risk && s.foodShort() && s.k.dir < 0 && s.k.state === "walk") s.allowRisk();
     s.tick(0.1); ticks++;
     if (s.k.state === "decide") s.decide(Math.random() < st.greed);
   }

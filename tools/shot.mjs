@@ -15,6 +15,7 @@
 //   --pix 2               зерно пикселя
 //   --w 1180              ширина окна
 //   --wait 900            сколько мс покрутить симуляцию перед снимком
+//   --wayf                поставить рядом всех путников (иначе ждать их долго)
 import path from "path";
 import fs from "fs";
 import { execFileSync } from "child_process";
@@ -52,6 +53,7 @@ const cfg = {
   pix: Number(opt("pix", 2)),
   width: Number(opt("w", 1180)),
   wait: Number(opt("wait", 900)),
+  wayf: !!opt("wayf", false),
 };
 
 const browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
@@ -112,6 +114,16 @@ await page.evaluate(c => {
     s.startWave(false);
     if (c.state === "fight") { s.engage(); s.k.state = "fight"; }
     s.floats.length = 0;
+  }
+  if (c.wayf) {
+    s.travellers.length = 0;
+    const kinds = ["pedlar","pilgrim","refugee","merc","cart","herald","monk"];
+    kinds.forEach((k, i) => {
+      const t = window.rollWayf(s, s.k.dist, s.k.dist);
+      t.k = k; t.met = true; t.dir = i % 2 ? 1 : -1;
+      t.x = s.k.dist - 150 + i * 46;
+      s.travellers.push(t);
+    });
   }
 }, cfg);
 await page.waitForTimeout(160);

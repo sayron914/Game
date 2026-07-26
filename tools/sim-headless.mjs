@@ -23,7 +23,7 @@ function loadSim(path) {
 
 // «игрок»: берёт ближайший контракт, лечит гниль, готовится, выходит
 function play(api, hours, policy = {}) {
-  const { Sim, ACTS } = api;
+  const { Sim, ACTS, BLD, STATIONS } = api;
   const log = [];
   const s = new Sim((t, tone) => log.push([tone, t]));
   const TICKS = Math.round(hours * 36000);
@@ -51,6 +51,19 @@ function play(api, hours, policy = {}) {
         const a = want && ACTS.find(x => x.id === want);
         if (a && s.canAct(a)) { s.doAct(a.id); if (!firstBuy.t) firstBuy.t = ticks / 600; }
         else break;
+      }
+      // тратим заработанное: без этого «деньги некуда девать» показывает
+      // не игру, а то, что подставной игрок ничего не покупает
+      let spendGuard = 0;
+      while (spendGuard++ < 12) {
+        const affordable = BLD
+          .map(b => ({ id: b.id, c: s.bldCost(b.id) }))
+          .filter(b => s.gold >= b.c * 1.6)
+          .sort((a, b) => a.c - b.c)[0];
+        if (affordable) { s.buy(affordable.id); spent += affordable.c; continue; }
+        const st = STATIONS.find(x => !s.stations.includes(x.d) && s.gold >= x.c * 2);
+        if (st) { s.buyStation(st.d); spent += st.c; continue; }
+        break;
       }
       if (!s.pending && s.contract) s.depart();
     }
